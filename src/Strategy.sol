@@ -1,245 +1,387 @@
 // SPDX-License-Identifier: AGPL-3.0
 pragma solidity ^0.8.18;
 
-import {BaseStrategy, ERC20} from "@tokenized-strategy/BaseStrategy.sol";
+import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
-// Import interfaces for many popular DeFi projects, or add your own!
-//import "../interfaces/<protocol>/<Interface>.sol";
+import {ITroveManager} from "./interfaces/ITroveManager.sol";
+import {IPriceOracle} from "./interfaces/IPriceOracle.sol";
+import {IMorpho} from "./interfaces/IMorpho.sol";
+import {IDutchDesk} from "./interfaces/IDutchDesk.sol";
+import {IAuction} from "./interfaces/IAuction.sol";
+import {IDebtInFrontHelper} from "./interfaces/IDebtInFrontHelper.sol";
 
-/**
- * The `TokenizedStrategy` variable can be used to retrieve the strategies
- * specific storage data your contract.
- *
- *       i.e. uint256 totalAssets = TokenizedStrategy.totalAssets()
- *
- * This can not be used for write functions. Any TokenizedStrategy
- * variables that need to be updated post deployment will need to
- * come from an external call from the strategies specific `management`.
- */
+import {BaseLooper} from "./BaseLooper.sol";
 
-// NOTE: To implement permissioned functions you can use the onlyManagement, onlyEmergencyAuthorized and onlyKeepers modifiers
+//  *
+//  *         A borrow draws first from the lender's idle liquidity, then (only when
+//  *         `allowRedemption` is set) redeems lower-rate troves for the rest,
+//  *         kicking a Dutch auction with this strategy as receiver; we take that
+//  *         auction atomically in the same tx, swapping the redeemed collateral
+//  *         back to asset through the exchange. So _maxBorrowAmount() = idle when
+//  *         redemption is off, idle + debt-in-front when on.
+//  *
+//  *         Enable `allowRedemption` only for vault-redeem markets (collateral is a
+//  *         vault of the borrow token) where that swap is ~lossless; for non-vault
+//  *         markets keep it off and pre-fund the lender with idle liquidity, since
+//  *         a lossy redeemed-collateral->asset swap would make the lever step revert.
+//  */
+contract Strategy is BaseLooper {
 
-contract Strategy is BaseStrategy {
     using SafeERC20 for ERC20;
 
-    constructor(address _asset, string memory _name) BaseStrategy(_asset, _name) {}
+    // ===============================================================
+    // Storage
+    // ===============================================================
 
-    /*//////////////////////////////////////////////////////////////
-                NEEDED TO BE OVERRIDDEN BY STRATEGIST
-    //////////////////////////////////////////////////////////////*/
+    /// @notice Trove ID
+    uint256 public troveId;
 
-    /**
-     * @dev Can deploy up to '_amount' of 'asset' in the yield source.
-     *
-     * This function is called at the end of a {deposit} or {mint}
-     * call. Meaning that unless a whitelist is implemented it will
-     * be entirely permissionless and thus can be sandwiched or otherwise
-     * manipulated.
-     *
-     * @param _amount The amount of 'asset' that the strategy can attempt
-     * to deposit in the yield source.
-     */
-    function _deployFunds(uint256 _amount) internal override {
-        // TODO: implement deposit logic EX:
-        //
-        //      lendingPool.deposit(address(asset), _amount ,0);
+    /// @notice Whether borrows may redeem Troves or be limited to idle Lender liquidity
+    bool public allowRedemption;
+
+    /// @notice Sorted-troves insertion hints for the debt-in-front lookup in `_maxBorrowAmount()`
+    uint256 public debtInFrontHintPrev;
+    uint256 public debtInFrontHintNext;
+
+    /// @notice Morpho callback reentrancy guard
+    bool internal _isFlashloanActive;
+
+    /// @notice True while a `manualClose()` flash loan is in flight
+    bool internal _isClosing;
+
+    /// @notice True while we are taking a redemption auction
+    bool internal _isTakingAuction;
+
+    // ===============================================================
+    // Constants
+    // ===============================================================
+
+    /// @notice The market's minimum debt
+    uint256 public immutable MIN_DEBT;
+
+    /// @notice The market's minimum collateral ratio (WAD, e.g. 1.1e18)
+    uint256 public immutable MCR;
+
+    /// @notice Index used to derive our Trove ID
+    uint256 public constant OWNER_INDEX = 0;
+
+    /// @notice Trove status value for an ACTIVE Trove
+    uint256 internal constant _STATUS_ACTIVE = 1;
+
+    /// @notice The Flex Lender contract
+    address public immutable LENDER;
+
+    /// @notice The Flex Trove Manager contract
+    ITroveManager public immutable TROVE_MANAGER;
+
+    /// @notice The Flex Dutch Desk contract
+    IDutchDesk public immutable DUTCH_DESK;
+
+    /// @notice The Flex Auction contract
+    IAuction public immutable AUCTION;
+
+    /// @notice The Flex Debt-In-Front Helper contract
+    IDebtInFrontHelper public immutable DEBT_IN_FRONT_HELPER;
+
+    /// @notice The Flex collateral price oracle contract. 1e36-format, collateral priced in borrow token
+    IPriceOracle public immutable ORACLE;
+
+    /// @notice The flash-loan provider
+    IMorpho public constant MORPHO = IMorpho(0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb);
+
+    // ===============================================================
+    // Constructor
+    // ===============================================================
+
+    /// @param _asset The borrow token (e.g. USDC)
+    /// @param _name Strategy name for BaseLooper events
+    /// @param _troveManager The Flex Trove Manager contract
+    /// @param _exchange The exchange address for collateral <--> asset swaps
+    /// @param _debtInFrontHelper The Flex Debt-In-Front Helper contract
+    /// @param _governance The address with management permissions (e.g. for opening the trove and toggling redemption)
+    constructor(
+        address _asset,
+        address _collateraltoken,
+        string memory _name,
+        address _troveManager,
+        address _exchange,
+        address _debtInFrontHelper,
+        address _governance
+    ) BaseLooper(_asset, _name, _collateraltoken, _governance, _exchange) {
+        TROVE_MANAGER = _troveManager;
+        require(_asset == TROVE_MANAGER.borrow_token(), "!borrow");
+        require(_collateraltoken == TROVE_MANAGER.collateral_token(), "!collateral");
+
+        DEBT_IN_FRONT_HELPER = _debtInFrontHelper;
+
+        // Set Flex contract addresses from the Trove Manager
+        LENDER = TROVE_MANAGER.lender();
+        DUTCH_DESK = TROVE_MANAGER.dutch_desk();
+        AUCTION = IDutchDesk(TROVE_MANAGER.dutch_desk()).auction();
+        ORACLE = TROVE_MANAGER.price_oracle();
+
+        // Set market parameters from the Trove Manager
+        MIN_DEBT = TROVE_MANAGER.min_debt();
+        MCR = TROVE_MANAGER.minimum_collateral_ratio();
+
+        // Max approve Trove Manager to pull collateral (supply) and borrow token (repay/close)
+        ERC20(_collateraltoken).forceApprove(_troveManager, type(uint256).max);
+        ERC20(_asset).forceApprove(_troveManager, type(uint256).max);
+
+        // Max approve Morpho to pull the flash-loan repayment
+        ERC20(_asset).forceApprove(address(MORPHO), type(uint256).max);
     }
 
-    /**
-     * @dev Should attempt to free the '_amount' of 'asset'.
-     *
-     * NOTE: The amount of 'asset' that is already loose has already
-     * been accounted for.
-     *
-     * This function is called during {withdraw} and {redeem} calls.
-     * Meaning that unless a whitelist is implemented it will be
-     * entirely permissionless and thus can be sandwiched or otherwise
-     * manipulated.
-     *
-     * Should not rely on asset.balanceOf(address(this)) calls other than
-     * for diff accounting purposes.
-     *
-     * Any difference between `_amount` and what is actually freed will be
-     * counted as a loss and passed on to the withdrawer. This means
-     * care should be taken in times of illiquidity. It may be better to revert
-     * if withdraws are simply illiquid so not to realize incorrect losses.
-     *
-     * @param _amount, The amount of 'asset' to be freed.
-     */
-    function _freeFunds(uint256 _amount) internal override {
-        // TODO: implement withdraw logic EX:
-        //
-        //      lendingPool.withdraw(address(asset), _amount);
+    // ===============================================================
+    // Trove operations
+    // ===============================================================
+
+    /// @inheritdoc BaseLooper
+    function _supplyCollateral(uint256 _amount) internal override {
+        if (_amount == 0) return;
+        TROVE_MANAGER.add_collateral(troveId, _amount);
     }
 
-    /**
-     * @dev Internal function to harvest all rewards, redeploy any idle
-     * funds and return an accurate accounting of all funds currently
-     * held by the Strategy.
-     *
-     * This should do any needed harvesting, rewards selling, accrual,
-     * redepositing etc. to get the most accurate view of current assets.
-     *
-     * NOTE: All applicable assets including loose assets should be
-     * accounted for in this function.
-     *
-     * Care should be taken when relying on oracles or swap values rather
-     * than actual amounts as all Strategy profit/loss accounting will
-     * be done based on this returned value.
-     *
-     * This can still be called post a shutdown, a strategist can check
-     * `TokenizedStrategy.isShutdown()` to decide if funds should be
-     * redeployed or simply realize any profits/losses.
-     *
-     * @return _totalAssets A trusted and accurate account for the total
-     * amount of 'asset' the strategy currently holds including idle funds.
-     */
-    function _harvestAndReport() internal override returns (uint256 _totalAssets) {
-        // TODO: Implement harvesting logic and accurate accounting EX:
-        //
-        //      if(!TokenizedStrategy.isShutdown()) {
-        //          _claimAndSellRewards();
-        //      }
-        //      _totalAssets = aToken.balanceOf(address(this)) + asset.balanceOf(address(this));
-        //
-        _totalAssets = asset.balanceOf(address(this));
+    /// @inheritdoc BaseLooper
+    function _withdrawCollateral(uint256 _amount) internal override {
+        if (_amount == 0) return;
+        TROVE_MANAGER.remove_collateral(troveId, _amount);
     }
 
-    /*//////////////////////////////////////////////////////////////
-                    OPTIONAL TO OVERRIDE BY STRATEGIST
-    //////////////////////////////////////////////////////////////*/
+    /// @inheritdoc BaseLooper
+    function _borrow(uint256 _amount) internal override {
+        if (_amount == 0) return;
 
-    /**
-     * @notice Gets the max amount of `asset` that can be withdrawn.
-     * @dev Defaults to an unlimited amount for any address. But can
-     * be overridden by strategists.
-     *
-     * This function will be called before any withdraw or redeem to enforce
-     * any limits desired by the strategist. This can be used for illiquid
-     * or sandwichable strategies.
-     *
-     *   EX:
-     *       return asset.balanceOf(yieldSource);
-     *
-     * This does not need to take into account the `_owner`'s share balance
-     * or conversion rates from shares to assets.
-     *
-     * @param . The address that is withdrawing from the strategy.
-     * @return . The available amount that can be withdrawn in terms of `asset`
-     */
-    function availableWithdrawLimit(
-        address /*_owner*/
-    )
-        public
-        view
-        override
-        returns (uint256)
+        // If redemption is disabled, force full delivery from idle liquidity
+        // If enabled, allow the redeem path and take the auction atomically
+        if (allowRedemption) {
+            uint256 _nonceBefore = DUTCH_DESK.nonce();
+            TROVE_MANAGER.borrow(troveId, _amount, type(uint256).max, 0, 0);
+            _takeAuctionIfKicked(_nonceBefore);
+        } else {
+            TROVE_MANAGER.borrow(troveId, _amount, type(uint256).max, _amount, 0);
+        }
+    }
+
+    /// @inheritdoc BaseLooper
+    function _repay(uint256 amount) internal override {
+        if (amount == 0) return;
+        TROVE_MANAGER.repay(troveId, amount);
+    }
+
+    // ===============================================================
+    // Flash loan
+    // ===============================================================
+
+    /// @inheritdoc BaseLooper
+    function _executeFlashloan(address _token, uint256 _amount, bytes memory _data) internal override {
+        _isFlashloanActive = true;
+        MORPHO.flashLoan(_token, _amount, _data);
+        _isFlashloanActive = false;
+    }
+
+    /// @inheritdoc BaseLooper
+    function onMorphoFlashLoan(uint256 _assets, bytes calldata _data) external {
+        require(msg.sender == address(MORPHO), "!morpho");
+        require(_isFlashloanActive, "!active");
+        _isClosing ? _handleClose(_assets) : _onFlashloanReceived(_assets, _data);
+    }
+
+    /// @inheritdoc BaseLooper
+    function maxFlashloan() public view override returns (uint256) {
+        return asset.balanceOf(address(MORPHO));
+    }
+
+    // ===============================================================
+    // Protocol Views
+    // ===============================================================
+
+    /// @notice Checks if the Trove is active or not yet opened (troveId == 0)
+    /// @dev Returns True when not opened yet to allow for seed deposits
+    /// @return True if the Trove is active or not yet opened, false if it is zombie, liquidated, or closed
+    function _isTroveActive() internal view returns (bool) {
+        uint256 _troveId = troveId;
+        return _troveId == 0 || TROVE_MANAGER.troves(_troveId).status == _STATUS_ACTIVE;
+    }
+
+    /// @inheritdoc BaseLooper
+    function balanceOfCollateral() public view override returns (uint256) {
+        return TROVE_MANAGER.troves(troveId).collateral;
+    }
+
+    /// @inheritdoc BaseLooper
+    function balanceOfDebt() public view override returns (uint256) {
+        return TROVE_MANAGER.get_trove_debt_after_interest(troveId);
+    }
+
+    /// @inheritdoc BaseLooper
+    function getLiquidateCollateralFactor() public view override returns (uint256) {
+        return (WAD * WAD) / MCR;
+    }
+
+    /// @inheritdoc BaseLooper
+    function _isLiquidatable() internal view override returns (bool) {
+        (uint256 _collateralValue, uint256 _debt) = position();
+        if (_debt == 0) return false;
+        return (_collateralValue * WAD) / _debt < MCR;
+    }
+
+    /// @inheritdoc BaseLooper
+    function _isSupplyPaused() internal view override returns (bool) {
+        return !_isTroveActive();
+    }
+
+    /// @inheritdoc BaseLooper
+    function _isBorrowPaused() internal view override returns (bool) {
+        return !_isTroveActive();
+    }
+
+    /// @inheritdoc BaseLooper
+    function _maxCollateralDeposit() internal pure override returns (uint256) {
+        return type(uint256).max;
+    }
+
+    /// @inheritdoc BaseLooper
+    function _maxBorrowAmount() internal view override returns (uint256) {
+        uint256 _troveId = troveId;
+        uint256 _idle = asset.balanceOf(LENDER);
+
+        // If redemption is disabled, we can only borrow up to the idle liquidity
+        if (!allowRedemption) return _idle;
+
+        // Debt of all Troves paying a lower rate than ours (i.e. what we can redeem)
+        uint256 _redeemable = DEBT_IN_FRONT_HELPER.get_debt_in_front(
+            address(TROVE_MANAGER), // troveManager
+            0, // interestRateLow
+            TROVE_MANAGER.troves(_troveId).annualInterestRate, // interestRateHigh
+            _troveId, // stopAtTroveId
+            debtInFrontHintPrev, // hintPrevId
+            debtInFrontHintNext // hintNextId
+        );
+
+        return _idle + _redeemable;
+    }
+
+    // ===============================================================
+    // Oracle
+    // ===============================================================
+
+    /// @inheritdoc BaseLooper
+    function _getCollateralPrice() internal view override returns (uint256) {
+        return ORACLE.get_price(true);
+    }
+
+    // ===============================================================
+    // Rewards
+    // ===============================================================
+
+    /// @inheritdoc BaseLooper
+    function _claimAndSellRewards() internal pure override {
+        return; // no rewards
+    }
+
+    // @todo -- here
+    // ===============================================================
+    // Close
+    // ===============================================================
+
+    /// @notice Fully unwind the trove via a flash loan (repay all debt + close),
+    ///         leaving the freed equity as idle asset. Needed because repay()
+    ///         can't take the trove below MIN_DEBT.
+    function manualClose() external onlyEmergencyAuthorized {
+        require(troveId != 0, "no trove");
+        isClosing = true;
+        _executeFlashloan(address(asset), balanceOfDebt(), "");
+        isClosing = false;
+    }
+
+    function _handleClose(uint256 /*assets*/) internal {
+        TROVE_MANAGER.close_trove(troveId);
+        troveId = 0;
+        _convertCollateralToAsset(balanceOfCollateralToken());
+    }
+
+    // ===============================================================
+    // OPEN (MANAGEMENT, ONCE)
+    // ===============================================================
+
+    /// @notice Open the trove. Must be done by management before any looping.
+    /// @dev Swaps `_assetToSeed` of idle asset into collateral and opens the
+    ///      trove at MIN_DEBT. `_prevId`/`_nextId` are sorted-trove insertion
+    ///      hints (computed off-chain). Seed enough that the MIN_DEBT trove
+    ///      clears MCR.
+    function openTrove(uint256 _assetToSeed, uint256 _annualInterestRate, uint256 _prevId, uint256 _nextId)
+        external
+        onlyManagement
+        returns (uint256 _troveId)
     {
-        // NOTE: Withdraw limitations such as liquidity constraints should be accounted for HERE
-        //  rather than _freeFunds in order to not count them as losses on withdraws.
-
-        // TODO: If desired implement withdraw limit logic and any needed state variables.
-
-        // EX:
-        // if(yieldSource.notShutdown()) {
-        //    return asset.balanceOf(address(this)) + asset.balanceOf(yieldSource);
-        // }
-        return asset.balanceOf(address(this));
+        require(troveId == 0, "trove exists");
+        require(_assetToSeed <= balanceOfAsset(), "!idle");
+        uint256 collateral = _convertAssetToCollateral(_assetToSeed);
+        uint256 nonceBefore = IDutchDesk(DUTCH_DESK).nonce();
+        _troveId = ITroveManager(TROVE_MANAGER).open_trove(
+            OWNER_INDEX,
+            collateral,
+            MIN_DEBT,
+            _prevId,
+            _nextId,
+            _annualInterestRate,
+            type(uint256).max, // accept any upfront fee
+            0,
+            0,
+            address(this)
+        );
+        troveId = _troveId;
+        // Opening borrows MIN_DEBT, which can redeem if lender liquidity is short.
+        _takeAuctionIfKicked(nonceBefore);
     }
 
-    /**
-     * @notice Gets the max amount of `asset` that an address can deposit.
-     * @dev Defaults to an unlimited amount for any address. But can
-     * be overridden by strategists.
-     *
-     * This function will be called before any deposit or mints to enforce
-     * any limits desired by the strategist. This can be used for either a
-     * traditional deposit limit or for implementing a whitelist etc.
-     *
-     *   EX:
-     *      if(isAllowed[_owner]) return super.availableDepositLimit(_owner);
-     *
-     * This does not need to take into account any conversion rates
-     * from shares to assets. But should know that any non max uint256
-     * amounts may be converted to shares. So it is recommended to keep
-     * custom amounts low enough as not to cause overflow when multiplied
-     * by `totalSupply`.
-     *
-     * @param . The address that is depositing into the strategy.
-     * @return . The available amount the `_owner` can deposit in terms of `asset`
-     *
-     * function availableDepositLimit(
-     *     address _owner
-     * ) public view override returns (uint256) {
-     *     TODO: If desired Implement deposit limit logic and any needed state variables .
-     *
-     *     EX:
-     *         uint256 totalAssets = TokenizedStrategy.totalAssets();
-     *         return totalAssets >= depositLimit ? 0 : depositLimit - totalAssets;
-     * }
-     */
+    /// @notice Toggle whether borrows may redeem lower-rate troves for liquidity.
+    /// @dev Enable only for vault-redeem markets (collateral is a vault of the
+    ///      borrow token), where the redeemed-collateral->asset swap is lossless.
+    function setAllowRedemption(bool _allowRedemption) external onlyManagement {
+        allowRedemption = _allowRedemption;
+    }
 
-    /**
-     * @dev Optional function for strategist to override that can
-     *  be called in between reports.
-     *
-     * If '_tend' is used tendTrigger() will also need to be overridden.
-     *
-     * This call can only be called by a permissioned role so may be
-     * through protected relays.
-     *
-     * This can be used to harvest and compound rewards, deposit idle funds,
-     * perform needed position maintenance or anything else that doesn't need
-     * a full report for.
-     *
-     *   EX: A strategy that can not deposit funds without getting
-     *       sandwiched can use the tend when a certain threshold
-     *       of idle to totalAssets has been reached.
-     *
-     * This will have no effect on PPS of the strategy till report() is called.
-     *
-     * @param _totalIdle The current amount of idle funds that are available to deploy.
-     *
-     * function _tend(uint256 _totalIdle) internal override {}
-     */
+    /// @notice Update the sorted-troves hints used by the debt-in-front lookup in
+    ///         `_maxBorrowAmount`, keeping that lookup cheap as the list changes.
+    /// @dev Stale/bad hints only cost extra gas (the helper falls back to a linear
+    ///      search), never correctness, so they're safe to leave to the emergency admin.
+    function setDebtInFrontHints(uint256 _hintPrev, uint256 _hintNext) external onlyEmergencyAuthorized {
+        debtInFrontHintPrev = _hintPrev;
+        debtInFrontHintNext = _hintNext;
+    }
 
-    /**
-     * @dev Optional trigger to override if tend() will be used by the strategy.
-     * This must be implemented if the strategy hopes to invoke _tend().
-     *
-     * @return . Should return true if tend() should be called by keeper or false if not.
-     *
-     * function _tendTrigger() internal view override returns (bool) {}
-     */
+    /*//////////////////////////////////////////////////////////////
+                        REDEMPTION AUCTION TAKING
+    //////////////////////////////////////////////////////////////*/
 
-    /**
-     * @dev Optional function for a strategist to override that will
-     * allow management to manually withdraw deployed funds from the
-     * yield source if a strategy is shutdown.
-     *
-     * This should attempt to free `_amount`, noting that `_amount` may
-     * be more than is currently deployed.
-     *
-     * NOTE: This will not realize any profits or losses. A separate
-     * {report} will be needed in order to record any profit/loss. If
-     * a report may need to be called after a shutdown it is important
-     * to check if the strategy is shutdown during {_harvestAndReport}
-     * so that it does not simply re-deploy all funds that had been freed.
-     *
-     * EX:
-     *   if(freeAsset > 0 && !TokenizedStrategy.isShutdown()) {
-     *       depositFunds...
-     *    }
-     *
-     * @param _amount The amount of asset to attempt to free.
-     *
-     * function _emergencyWithdraw(uint256 _amount) internal override {
-     *     TODO: If desired implement simple logic to free deployed funds.
-     *
-     *     EX:
-     *         _amount = min(_amount, aToken.balanceOf(address(this)));
-     *         _freeFunds(_amount);
-     * }
-     */
+    /// @dev If the preceding borrow/open redeemed (bumping the dutch desk nonce),
+    ///      it kicked auction id == `_nonceBefore` with this strategy as receiver.
+    ///      Take it now so the borrow is fully realized in this same tx.
+    function _takeAuctionIfKicked(uint256 _nonceBefore) internal {
+        if (IDutchDesk(DUTCH_DESK).nonce() == _nonceBefore) return;
+        isTakingAuction = true;
+        // Non-empty data triggers takeCallback on us.
+        IAuction(AUCTION).take(_nonceBefore, type(uint256).max, address(this), abi.encode(uint256(1)));
+        isTakingAuction = false;
+    }
+
+    /// @dev Auction callback: we already received `amountTaken` of the redeemed
+    ///      collateral; swap it back to asset (slippage-checked via the exchange)
+    ///      and let the auction pull the `neededAmount` payment. As the auction
+    ///      receiver, that payment circles back to us up to what we were owed.
+    function takeCallback(
+        uint256, /*auctionId*/
+        address taker,
+        uint256 amountTaken,
+        uint256 neededAmount,
+        bytes calldata /*data*/
+    ) external {
+        require(isTakingAuction && msg.sender == AUCTION, "!auction");
+        require(taker == address(this), "!taker");
+        _convertCollateralToAsset(amountTaken);
+        ERC20(address(asset)).forceApprove(AUCTION, neededAmount);
+    }
 }
