@@ -13,7 +13,7 @@ contract StrategyFactory {
     address public performanceFeeRecipient;
     address public keeper;
 
-    /// @notice Track the deployments. asset => pool => strategy
+    /// @notice Track the deployments. troveManager (market) => strategy
     mapping(address => address) public deployments;
 
     constructor(address _management, address _performanceFeeRecipient, address _keeper, address _emergencyAdmin) {
@@ -25,12 +25,39 @@ contract StrategyFactory {
 
     /**
      * @notice Deploy a new Strategy.
-     * @param _asset The underlying asset for the strategy to use.
+     * @param _asset The underlying asset (the market's borrow token, e.g. USDC).
+     * @param _collateralToken The market's collateral token.
+     * @param _name The name for the strategy.
+     * @param _troveManager The Flex Trove Manager (the market) to loop on.
+     * @param _exchange The exchange used for collateral <--> asset swaps.
+     * @param _debtInFrontHelper The Flex Debt-In-Front Helper.
+     * @param _allowRedemption Whether borrows may redeem (vault-redeem markets only).
      * @return . The address of the new strategy.
      */
-    function newStrategy(address _asset, string calldata _name) external virtual returns (address) {
+    function newStrategy(
+        address _asset,
+        address _collateralToken,
+        string calldata _name,
+        address _troveManager,
+        address _exchange,
+        address _debtInFrontHelper,
+        bool _allowRedemption
+    ) external virtual returns (address) {
         // tokenized strategies available setters.
-        IStrategyInterface _newStrategy = IStrategyInterface(address(new Strategy(_asset, _name)));
+        IStrategyInterface _newStrategy = IStrategyInterface(
+            address(
+                new Strategy(
+                    _asset,
+                    _collateralToken,
+                    _name,
+                    _troveManager,
+                    _exchange,
+                    _debtInFrontHelper,
+                    _allowRedemption,
+                    management // governance
+                )
+            )
+        );
 
         _newStrategy.setPerformanceFeeRecipient(performanceFeeRecipient);
 
@@ -42,7 +69,8 @@ contract StrategyFactory {
 
         emit NewStrategy(address(_newStrategy), _asset);
 
-        deployments[_asset] = address(_newStrategy);
+        // Keyed by Trove Manager: one strategy per market (an asset can back several markets).
+        deployments[_troveManager] = address(_newStrategy);
         return address(_newStrategy);
     }
 
@@ -54,7 +82,7 @@ contract StrategyFactory {
     }
 
     function isDeployedStrategy(address _strategy) external view returns (bool) {
-        address _asset = IStrategyInterface(_strategy).asset();
-        return deployments[_asset] == _strategy;
+        address _troveManager = IStrategyInterface(_strategy).TROVE_MANAGER();
+        return deployments[_troveManager] == _strategy;
     }
 }

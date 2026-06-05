@@ -4,6 +4,8 @@ pragma solidity ^0.8.18;
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
+import {FlexOps} from "./libraries/FlexOps.sol";
+
 import {ITroveManager} from "./interfaces/ITroveManager.sol";
 import {IPriceOracle} from "./interfaces/IPriceOracle.sol";
 import {IMorpho} from "./interfaces/IMorpho.sol";
@@ -13,19 +15,6 @@ import {IDebtInFrontHelper} from "./interfaces/IDebtInFrontHelper.sol";
 
 import {BaseLooper} from "./BaseLooper.sol";
 
-//  *
-//  *         A borrow draws first from the lender's idle liquidity, then (only when
-//  *         `allowRedemption` is set) redeems lower-rate troves for the rest,
-//  *         kicking a Dutch auction with this strategy as receiver; we take that
-//  *         auction atomically in the same tx, swapping the redeemed collateral
-//  *         back to asset through the exchange. So _maxBorrowAmount() = idle when
-//  *         redemption is off, idle + debt-in-front when on.
-//  *
-//  *         Enable `allowRedemption` only for vault-redeem markets (collateral is a
-//  *         vault of the borrow token) where that swap is ~lossless; for non-vault
-//  *         markets keep it off and pre-fund the lender with idle liquidity, since
-//  *         a lossy redeemed-collateral->asset swap would make the lever step revert.
-//  */
 contract Strategy is BaseLooper {
 
     using SafeERC20 for ERC20;
@@ -37,18 +26,12 @@ contract Strategy is BaseLooper {
     /// @notice Trove ID
     uint256 public troveId;
 
-    /// @notice Whether borrows may redeem Troves or be limited to idle Lender liquidity
-    bool public allowRedemption;
-
     /// @notice Sorted-troves insertion hints for the debt-in-front lookup in `_maxBorrowAmount()`
     uint256 public debtInFrontHintPrev;
     uint256 public debtInFrontHintNext;
 
     /// @notice Morpho callback reentrancy guard
     bool internal _isFlashloanActive;
-
-    /// @notice True while a `manualClose()` flash loan is in flight
-    bool internal _isClosing;
 
     /// @notice True while we are taking a redemption auction
     bool internal _isTakingAuction;
@@ -63,11 +46,15 @@ contract Strategy is BaseLooper {
     /// @notice The market's minimum collateral ratio (WAD, e.g. 1.1e18)
     uint256 public immutable MCR;
 
-    /// @notice Index used to derive our Trove ID
-    uint256 public constant OWNER_INDEX = 0;
+    /// @notice Whether borrows may redeem lower-rate Troves for liquidity beyond the
+    ///         Lender's idle balance. Enable only for markets where the collateral is a
+    ///         vault of the borrow token and the redeemed-collateral to asset swap is lossless.
+    ///         Otherwise, keep it disabled and pre-fund the lender with idle liquidity
+    bool public immutable ALLOW_REDEMPTION;
 
-    /// @notice Trove status value for an ACTIVE Trove
+    /// @notice Trove status values
     uint256 internal constant _STATUS_ACTIVE = 1;
+    uint256 internal constant _STATUS_ZOMBIE = 2;
 
     /// @notice The Flex Lender contract
     address public immutable LENDER;
@@ -99,7 +86,8 @@ contract Strategy is BaseLooper {
     /// @param _troveManager The Flex Trove Manager contract
     /// @param _exchange The exchange address for collateral <--> asset swaps
     /// @param _debtInFrontHelper The Flex Debt-In-Front Helper contract
-    /// @param _governance The address with management permissions (e.g. for opening the trove and toggling redemption)
+    /// @param _allowRedemption Whether borrows may redeem (vault-redeem markets only)
+    /// @param _governance The address with management permissions (e.g. for opening the trove)
     constructor(
         address _asset,
         address _collateraltoken,
@@ -107,18 +95,20 @@ contract Strategy is BaseLooper {
         address _troveManager,
         address _exchange,
         address _debtInFrontHelper,
+        bool _allowRedemption,
         address _governance
     ) BaseLooper(_asset, _name, _collateraltoken, _governance, _exchange) {
-        TROVE_MANAGER = _troveManager;
+        TROVE_MANAGER = ITroveManager(_troveManager);
         require(_asset == TROVE_MANAGER.borrow_token(), "!borrow");
         require(_collateraltoken == TROVE_MANAGER.collateral_token(), "!collateral");
 
-        DEBT_IN_FRONT_HELPER = _debtInFrontHelper;
+        DEBT_IN_FRONT_HELPER = IDebtInFrontHelper(_debtInFrontHelper);
+        ALLOW_REDEMPTION = _allowRedemption;
 
         // Set Flex contract addresses from the Trove Manager
         LENDER = TROVE_MANAGER.lender();
         DUTCH_DESK = TROVE_MANAGER.dutch_desk();
-        AUCTION = IDutchDesk(TROVE_MANAGER.dutch_desk()).auction();
+        AUCTION = DUTCH_DESK.auction();
         ORACLE = TROVE_MANAGER.price_oracle();
 
         // Set market parameters from the Trove Manager
@@ -140,13 +130,13 @@ contract Strategy is BaseLooper {
     /// @inheritdoc BaseLooper
     function _supplyCollateral(uint256 _amount) internal override {
         if (_amount == 0) return;
-        TROVE_MANAGER.add_collateral(troveId, _amount);
+        FlexOps.addCollateral(TROVE_MANAGER, troveId, _amount);
     }
 
     /// @inheritdoc BaseLooper
     function _withdrawCollateral(uint256 _amount) internal override {
         if (_amount == 0) return;
-        TROVE_MANAGER.remove_collateral(troveId, _amount);
+        FlexOps.removeCollateral(TROVE_MANAGER, troveId, _amount);
     }
 
     /// @inheritdoc BaseLooper
@@ -155,19 +145,19 @@ contract Strategy is BaseLooper {
 
         // If redemption is disabled, force full delivery from idle liquidity
         // If enabled, allow the redeem path and take the auction atomically
-        if (allowRedemption) {
+        if (ALLOW_REDEMPTION) {
             uint256 _nonceBefore = DUTCH_DESK.nonce();
-            TROVE_MANAGER.borrow(troveId, _amount, type(uint256).max, 0, 0);
+            FlexOps.borrow(TROVE_MANAGER, troveId, _amount, 0);
             _takeAuctionIfKicked(_nonceBefore);
         } else {
-            TROVE_MANAGER.borrow(troveId, _amount, type(uint256).max, _amount, 0);
+            FlexOps.borrow(TROVE_MANAGER, troveId, _amount, _amount);
         }
     }
 
     /// @inheritdoc BaseLooper
     function _repay(uint256 amount) internal override {
         if (amount == 0) return;
-        TROVE_MANAGER.repay(troveId, amount);
+        FlexOps.repay(TROVE_MANAGER, troveId, amount);
     }
 
     // ===============================================================
@@ -181,11 +171,13 @@ contract Strategy is BaseLooper {
         _isFlashloanActive = false;
     }
 
-    /// @inheritdoc BaseLooper
+    /// @notice Morpho flashloan callback
+    /// @dev Only callable by Morpho contract during flashLoan execution
     function onMorphoFlashLoan(uint256 _assets, bytes calldata _data) external {
         require(msg.sender == address(MORPHO), "!morpho");
         require(_isFlashloanActive, "!active");
-        _isClosing ? _handleClose(_assets) : _onFlashloanReceived(_assets, _data);
+        // Emergency close passes empty data, lever/delever pass an encoded FlashLoanData struct
+        _data.length == 0 ? _handleClose() : _onFlashloanReceived(_assets, _data);
     }
 
     /// @inheritdoc BaseLooper
@@ -198,7 +190,7 @@ contract Strategy is BaseLooper {
     // ===============================================================
 
     /// @notice Checks if the Trove is active or not yet opened (troveId == 0)
-    /// @dev Returns True when not opened yet to allow for seed deposits
+    /// @dev Returns True when not yet opened to allow for seed deposits
     /// @return True if the Trove is active or not yet opened, false if it is zombie, liquidated, or closed
     function _isTroveActive() internal view returns (bool) {
         uint256 _troveId = troveId;
@@ -248,19 +240,11 @@ contract Strategy is BaseLooper {
         uint256 _idle = asset.balanceOf(LENDER);
 
         // If redemption is disabled, we can only borrow up to the idle liquidity
-        if (!allowRedemption) return _idle;
+        if (!ALLOW_REDEMPTION) return _idle;
 
-        // Debt of all Troves paying a lower rate than ours (i.e. what we can redeem)
-        uint256 _redeemable = DEBT_IN_FRONT_HELPER.get_debt_in_front(
-            address(TROVE_MANAGER), // troveManager
-            0, // interestRateLow
-            TROVE_MANAGER.troves(_troveId).annualInterestRate, // interestRateHigh
-            _troveId, // stopAtTroveId
-            debtInFrontHintPrev, // hintPrevId
-            debtInFrontHintNext // hintNextId
-        );
-
-        return _idle + _redeemable;
+        // Idle plus the debt we can redeem (Troves paying a lower rate than ours)
+        return _idle
+            + FlexOps.maxRedeemable(DEBT_IN_FRONT_HELPER, TROVE_MANAGER, _troveId, debtInFrontHintPrev, debtInFrontHintNext);
     }
 
     // ===============================================================
@@ -281,107 +265,113 @@ contract Strategy is BaseLooper {
         return; // no rewards
     }
 
-    // @todo -- here
     // ===============================================================
-    // Close
+    // Emergency
     // ===============================================================
 
-    /// @notice Fully unwind the trove via a flash loan (repay all debt + close),
-    ///         leaving the freed equity as idle asset. Needed because repay()
-    ///         can't take the trove below MIN_DEBT.
-    function manualClose() external onlyEmergencyAuthorized {
-        require(troveId != 0, "no trove");
-        isClosing = true;
-        _executeFlashloan(address(asset), balanceOfDebt(), "");
-        isClosing = false;
+    /// @inheritdoc BaseLooper
+    function _emergencyWithdraw(uint256 /*_amount*/) internal override {
+        uint256 _status = TROVE_MANAGER.troves(troveId).status;
+        // A closeable Trove (ACTIVE or ZOMBIE) with debt must repay it on close, so
+        // flashloan the debt and finish in `_handleClose()`. Anything else (zombie with
+        // no debt or already liquidated/closed) just needs loose collateral swapped,
+        // done directly via `_handleClose()`
+        (_status == _STATUS_ACTIVE || _status == _STATUS_ZOMBIE) && balanceOfDebt() > 0 ?
+            _executeFlashloan(address(asset), balanceOfDebt(), "") : _handleClose();
     }
 
-    function _handleClose(uint256 /*assets*/) internal {
-        TROVE_MANAGER.close_trove(troveId);
-        troveId = 0;
+    /// @notice Handles the close in an emergency, with or without a preceding flashloan
+    function _handleClose() internal {
+        FlexOps.closeTrove(TROVE_MANAGER, troveId);
         _convertCollateralToAsset(balanceOfCollateralToken());
     }
 
     // ===============================================================
-    // OPEN (MANAGEMENT, ONCE)
+    // Manage Trove
     // ===============================================================
 
-    /// @notice Open the trove. Must be done by management before any looping.
-    /// @dev Swaps `_assetToSeed` of idle asset into collateral and opens the
-    ///      trove at MIN_DEBT. `_prevId`/`_nextId` are sorted-trove insertion
-    ///      hints (computed off-chain). Seed enough that the MIN_DEBT trove
-    ///      clears MCR.
-    function openTrove(uint256 _assetToSeed, uint256 _annualInterestRate, uint256 _prevId, uint256 _nextId)
-        external
-        onlyManagement
-        returns (uint256 _troveId)
-    {
+    /// @notice Open the trove. Must be done by management to initialize the strategy
+    /// @dev Swaps idle asset into collateral and opens the trove at MIN_DEBT.
+    ///      If redemption is enabled, takes the kicked auction atomically
+    /// @param _annualInterestRate The initial annual interest rate for the trove
+    /// @param _prevId Sorted-troves insertion hint (computed off-chain)
+    /// @param _nextId Sorted-troves insertion hint (computed off-chain)
+    /// @param _maxUpfrontFee The maximum upfront fee to pay for the adjustment
+    function openTrove(
+        uint256 _annualInterestRate,
+        uint256 _prevId,
+        uint256 _nextId,
+        uint256 _maxUpfrontFee
+    ) external onlyManagement {
         require(troveId == 0, "trove exists");
-        require(_assetToSeed <= balanceOfAsset(), "!idle");
-        uint256 collateral = _convertAssetToCollateral(_assetToSeed);
-        uint256 nonceBefore = IDutchDesk(DUTCH_DESK).nonce();
-        _troveId = ITroveManager(TROVE_MANAGER).open_trove(
-            OWNER_INDEX,
-            collateral,
-            MIN_DEBT,
+
+        uint256 nonceBefore = DUTCH_DESK.nonce();
+        troveId = FlexOps.openTrove(
+            TROVE_MANAGER,
+            420, // ownerIndex
+            _convertAssetToCollateral(balanceOfAsset()), // collateralAmount
+            MIN_DEBT, // debtAmount
             _prevId,
             _nextId,
             _annualInterestRate,
-            type(uint256).max, // accept any upfront fee
-            0,
-            0,
-            address(this)
+            _maxUpfrontFee,
+            ALLOW_REDEMPTION ? 0 : MIN_DEBT // minBorrowOut
         );
-        troveId = _troveId;
-        // Opening borrows MIN_DEBT, which can redeem if lender liquidity is short.
-        _takeAuctionIfKicked(nonceBefore);
+        if (ALLOW_REDEMPTION) _takeAuctionIfKicked(nonceBefore);
     }
 
-    /// @notice Toggle whether borrows may redeem lower-rate troves for liquidity.
-    /// @dev Enable only for vault-redeem markets (collateral is a vault of the
-    ///      borrow token), where the redeemed-collateral->asset swap is lossless.
-    function setAllowRedemption(bool _allowRedemption) external onlyManagement {
-        allowRedemption = _allowRedemption;
+    /// @notice Adjust the Trove's annual interest rate
+    /// @param _newAnnualInterestRate The new annual interest rate to set
+    /// @param _prevId Sorted-troves insertion hint (computed off-chain)
+    /// @param _nextId Sorted-troves insertion hint (computed off-chain)
+    /// @param _maxUpfrontFee The maximum upfront fee to pay for the adjustment
+    function adjustInterestRate(
+        uint256 _newAnnualInterestRate,
+        uint256 _prevId,
+        uint256 _nextId,
+        uint256 _maxUpfrontFee
+    ) external onlyKeepers {
+        FlexOps.adjustInterestRate(TROVE_MANAGER, troveId, _newAnnualInterestRate, _prevId, _nextId, _maxUpfrontFee);
     }
 
     /// @notice Update the sorted-troves hints used by the debt-in-front lookup in
-    ///         `_maxBorrowAmount`, keeping that lookup cheap as the list changes.
+    ///         `_maxBorrowAmount`, keeping that lookup cheap as the list changes
     /// @dev Stale/bad hints only cost extra gas (the helper falls back to a linear
-    ///      search), never correctness, so they're safe to leave to the emergency admin.
-    function setDebtInFrontHints(uint256 _hintPrev, uint256 _hintNext) external onlyEmergencyAuthorized {
+    ///      search), never correctness, so they're safe to leave to the keeper
+    function setDebtInFrontHints(uint256 _hintPrev, uint256 _hintNext) external onlyKeepers {
         debtInFrontHintPrev = _hintPrev;
         debtInFrontHintNext = _hintNext;
     }
 
-    /*//////////////////////////////////////////////////////////////
-                        REDEMPTION AUCTION TAKING
-    //////////////////////////////////////////////////////////////*/
+    // ===============================================================
+    // Redemption auction taking
+    // ===============================================================
 
-    /// @dev If the preceding borrow/open redeemed (bumping the dutch desk nonce),
-    ///      it kicked auction id == `_nonceBefore` with this strategy as receiver.
-    ///      Take it now so the borrow is fully realized in this same tx.
+    /// @notice Take the redemption auction if it was kicked by the preceding borrow
+    /// @param _nonceBefore The nonce of the Dutch Desk before the borrow.
+    ///        If it differs from the current nonce, the auction was kicked and should be taken
     function _takeAuctionIfKicked(uint256 _nonceBefore) internal {
-        if (IDutchDesk(DUTCH_DESK).nonce() == _nonceBefore) return;
-        isTakingAuction = true;
-        // Non-empty data triggers takeCallback on us.
-        IAuction(AUCTION).take(_nonceBefore, type(uint256).max, address(this), abi.encode(uint256(1)));
-        isTakingAuction = false;
+        if (DUTCH_DESK.nonce() == _nonceBefore) return;
+        _isTakingAuction = true;
+        AUCTION.take(_nonceBefore, type(uint256).max, address(this), abi.encode(uint256(420)));
+        _isTakingAuction = false;
     }
 
-    /// @dev Auction callback: we already received `amountTaken` of the redeemed
-    ///      collateral; swap it back to asset (slippage-checked via the exchange)
-    ///      and let the auction pull the `neededAmount` payment. As the auction
-    ///      receiver, that payment circles back to us up to what we were owed.
+    /// @notice Callback function for the auction when taking a redemption
+    /// @param _taker The address of the taker
+    /// @param _amountTaken The amount of collateral taken by the auction
+    /// @param _neededAmount The amount of asset needed to pay the auction
     function takeCallback(
         uint256, /*auctionId*/
-        address taker,
-        uint256 amountTaken,
-        uint256 neededAmount,
+        address _taker,
+        uint256 _amountTaken,
+        uint256 _neededAmount,
         bytes calldata /*data*/
     ) external {
-        require(isTakingAuction && msg.sender == AUCTION, "!auction");
-        require(taker == address(this), "!taker");
-        _convertCollateralToAsset(amountTaken);
-        ERC20(address(asset)).forceApprove(AUCTION, neededAmount);
+        require(_isTakingAuction && msg.sender == address(AUCTION), "!auction");
+        require(_taker == address(this), "!taker");
+
+        _convertCollateralToAsset(_amountTaken);
+        asset.forceApprove(address(AUCTION), _neededAmount);
     }
 }

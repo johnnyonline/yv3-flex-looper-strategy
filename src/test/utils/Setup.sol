@@ -77,7 +77,15 @@ contract Setup is Test, IEvents {
     function setUpStrategy() public returns (address) {
         // we save the strategy as a IStrategyInterface to give it the needed interface
         IStrategyInterface _strategy =
-            IStrategyInterface(address(strategyFactory.newStrategy(address(asset), "Tokenized Strategy")));
+            IStrategyInterface(address(strategyFactory.newStrategy(
+                address(asset), // _asset
+                address(0), // _collateralToken
+                "Tokenized Strategy", // _name
+                address(0), // _troveManager
+                address(0), // _exchange
+                address(0), // _debtInFrontHelper
+                false // _allowRedemption
+            )));
 
         vm.prank(management);
         _strategy.acceptManagement();

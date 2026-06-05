@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0
 pragma solidity ^0.8.18;
 
+import {IDutchDesk} from "./IDutchDesk.sol";
+import {IPriceOracle} from "./IPriceOracle.sol";
+
 interface ITroveManager {
     // Vyper flag `Status` ABI-encodes as uint256; every field is a 32-byte slot.
     struct Trove {
@@ -15,9 +18,9 @@ interface ITroveManager {
 
     function borrow_token() external view returns (address);
     function collateral_token() external view returns (address);
-    function price_oracle() external view returns (address);
+    function price_oracle() external view returns (IPriceOracle);
     function lender() external view returns (address);
-    function dutch_desk() external view returns (address);
+    function dutch_desk() external view returns (IDutchDesk);
     function min_debt() external view returns (uint256);
     function minimum_collateral_ratio() external view returns (uint256); // WAD, e.g. 1.1e18
 
@@ -46,5 +49,13 @@ interface ITroveManager {
         uint256 minCollateralOut
     ) external;
     function repay(uint256 troveId, uint256 debtAmount) external;
+    function adjust_interest_rate(
+        uint256 troveId,
+        uint256 newAnnualInterestRate,
+        uint256 prevId,
+        uint256 nextId,
+        uint256 maxUpfrontFee
+    ) external;
     function close_trove(uint256 troveId) external;
+    function close_zombie_trove(uint256 troveId) external;
 }
