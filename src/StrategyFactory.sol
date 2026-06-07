@@ -5,6 +5,7 @@ import {Strategy, ERC20} from "./Strategy.sol";
 import {IStrategyInterface} from "./interfaces/IStrategyInterface.sol";
 
 contract StrategyFactory {
+
     event NewStrategy(address indexed strategy, address indexed asset);
 
     address public immutable emergencyAdmin;
@@ -16,7 +17,12 @@ contract StrategyFactory {
     /// @notice Track the deployments. troveManager (market) => strategy
     mapping(address => address) public deployments;
 
-    constructor(address _management, address _performanceFeeRecipient, address _keeper, address _emergencyAdmin) {
+    constructor(
+        address _management,
+        address _performanceFeeRecipient,
+        address _keeper,
+        address _emergencyAdmin
+    ) {
         management = _management;
         performanceFeeRecipient = _performanceFeeRecipient;
         keeper = _keeper;
@@ -30,7 +36,6 @@ contract StrategyFactory {
      * @param _name The name for the strategy.
      * @param _troveManager The Flex Trove Manager (the market) to loop on.
      * @param _exchange The exchange used for collateral <--> asset swaps.
-     * @param _debtInFrontHelper The Flex Debt-In-Front Helper.
      * @param _allowRedemption Whether borrows may redeem (vault-redeem markets only).
      * @return . The address of the new strategy.
      */
@@ -40,7 +45,6 @@ contract StrategyFactory {
         string calldata _name,
         address _troveManager,
         address _exchange,
-        address _debtInFrontHelper,
         bool _allowRedemption
     ) external virtual returns (address) {
         // tokenized strategies available setters.
@@ -52,7 +56,6 @@ contract StrategyFactory {
                     _name,
                     _troveManager,
                     _exchange,
-                    _debtInFrontHelper,
                     _allowRedemption,
                     management // governance
                 )
@@ -74,15 +77,22 @@ contract StrategyFactory {
         return address(_newStrategy);
     }
 
-    function setAddresses(address _management, address _performanceFeeRecipient, address _keeper) external {
+    function setAddresses(
+        address _management,
+        address _performanceFeeRecipient,
+        address _keeper
+    ) external {
         require(msg.sender == management, "!management");
         management = _management;
         performanceFeeRecipient = _performanceFeeRecipient;
         keeper = _keeper;
     }
 
-    function isDeployedStrategy(address _strategy) external view returns (bool) {
+    function isDeployedStrategy(
+        address _strategy
+    ) external view returns (bool) {
         address _troveManager = IStrategyInterface(_strategy).TROVE_MANAGER();
         return deployments[_troveManager] == _strategy;
     }
+
 }

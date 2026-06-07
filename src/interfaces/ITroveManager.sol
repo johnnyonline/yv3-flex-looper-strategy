@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0
-pragma solidity ^0.8.18;
+pragma solidity 0.8.23;
 
 import {IDutchDesk} from "./IDutchDesk.sol";
 import {IPriceOracle} from "./IPriceOracle.sol";
 
 interface ITroveManager {
-    // Vyper flag `Status` ABI-encodes as uint256; every field is a 32-byte slot.
+
+    // Vyper flag `Status` ABI-encodes as uint256; every field is a 32-byte slot
     struct Trove {
         uint256 debt;
         uint256 collateral;
@@ -22,10 +23,15 @@ interface ITroveManager {
     function lender() external view returns (address);
     function dutch_desk() external view returns (IDutchDesk);
     function min_debt() external view returns (uint256);
-    function minimum_collateral_ratio() external view returns (uint256); // WAD, e.g. 1.1e18
+    function minimum_collateral_ratio() external view returns (uint256);
+    function min_annual_interest_rate() external view returns (uint256);
 
-    function troves(uint256 troveId) external view returns (Trove memory);
-    function get_trove_debt_after_interest(uint256 troveId) external view returns (uint256);
+    function troves(
+        uint256 troveId
+    ) external view returns (Trove memory);
+    function get_trove_debt_after_interest(
+        uint256 troveId
+    ) external view returns (uint256);
 
     function open_trove(
         uint256 ownerIndex,
@@ -39,8 +45,14 @@ interface ITroveManager {
         uint256 minCollateralOut,
         address owner
     ) external returns (uint256);
-    function add_collateral(uint256 troveId, uint256 collateralAmount) external;
-    function remove_collateral(uint256 troveId, uint256 collateralAmount) external;
+    function add_collateral(
+        uint256 troveId,
+        uint256 collateralAmount
+    ) external;
+    function remove_collateral(
+        uint256 troveId,
+        uint256 collateralAmount
+    ) external;
     function borrow(
         uint256 troveId,
         uint256 debtAmount,
@@ -48,7 +60,14 @@ interface ITroveManager {
         uint256 minBorrowOut,
         uint256 minCollateralOut
     ) external;
-    function repay(uint256 troveId, uint256 debtAmount) external;
+    function repay(
+        uint256 troveId,
+        uint256 debtAmount
+    ) external;
+    function redeem(
+        uint256 debtAmount,
+        address receiver
+    ) external;
     function adjust_interest_rate(
         uint256 troveId,
         uint256 newAnnualInterestRate,
@@ -56,6 +75,11 @@ interface ITroveManager {
         uint256 nextId,
         uint256 maxUpfrontFee
     ) external;
-    function close_trove(uint256 troveId) external;
-    function close_zombie_trove(uint256 troveId) external;
+    function close_trove(
+        uint256 troveId
+    ) external;
+    function close_zombie_trove(
+        uint256 troveId
+    ) external;
+
 }

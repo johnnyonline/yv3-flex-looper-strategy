@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0
-pragma solidity ^0.8.18;
+pragma solidity 0.8.23;
 
 interface IExchange {
+
     function name() external pure returns (string memory);
 
     function exchange(
@@ -10,4 +11,5 @@ interface IExchange {
         uint256 amountIn,
         uint256 amountOutMin
     ) external returns (uint256 amountOut);
+
 }

@@ -4,11 +4,14 @@ import "forge-std/console2.sol";
 import {Setup, ERC20, IStrategyInterface} from "./utils/Setup.sol";
 
 contract ShutdownTest is Setup {
+
     function setUp() public virtual override {
         super.setUp();
     }
 
-    function test_shutdownCanWithdraw(uint256 _amount) public {
+    function test_shutdownCanWithdraw(
+        uint256 _amount
+    ) public {
         vm.assume(_amount > minFuzzAmount && _amount < maxFuzzAmount);
 
         // Deposit into strategy
@@ -35,7 +38,9 @@ contract ShutdownTest is Setup {
         assertGe(asset.balanceOf(user), balanceBefore + _amount, "!final balance");
     }
 
-    function test_emergencyWithdraw_maxUint(uint256 _amount) public {
+    function test_emergencyWithdraw_maxUint(
+        uint256 _amount
+    ) public {
         vm.assume(_amount > minFuzzAmount && _amount < maxFuzzAmount);
 
         // Deposit into strategy
@@ -67,4 +72,6 @@ contract ShutdownTest is Setup {
     }
 
     // TODO: Add tests for any emergency function added.
+
+
 }

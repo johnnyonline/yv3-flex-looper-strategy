@@ -5,6 +5,7 @@ import "forge-std/console2.sol";
 import {Setup, ERC20, IStrategyInterface} from "./utils/Setup.sol";
 
 contract FunctionSignatureTest is Setup {
+
     function setUp() public virtual override {
         super.setUp();
     }
@@ -80,4 +81,5 @@ contract FunctionSignatureTest is Setup {
         assertEq(strategy.balanceOf(user), wad, "second balance");
         assertEq(strategy.balanceOf(keeper), 0, "keeper balance");
     }
+
 }
