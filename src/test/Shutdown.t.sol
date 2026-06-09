@@ -1,7 +1,8 @@
+// SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.18;
 
-import "forge-std/console2.sol";
 import {Setup, ERC20, IStrategyInterface} from "./utils/Setup.sol";
+import {ITroveManager} from "../interfaces/ITroveManager.sol";
 
 contract ShutdownTest is Setup {
 
@@ -14,28 +15,36 @@ contract ShutdownTest is Setup {
     ) public {
         vm.assume(_amount > minFuzzAmount && _amount < maxFuzzAmount);
 
-        // Deposit into strategy
+        // Deposit and lever up to target
         mintAndDepositIntoStrategy(strategy, user, _amount);
+        vm.prank(keeper);
+        strategy.tend();
+        _assertAtTargetLeverage();
 
-        assertEq(strategy.totalAssets(), _amount, "!totalAssets");
+        // Earn interest and report
+        accrueYield(_amount);
+        vm.prank(keeper);
+        strategy.report();
 
-        // Earn Interest
-        skip(1 days);
-
-        // Shutdown the strategy
+        // Shut the strategy down
         vm.prank(emergencyAdmin);
         strategy.shutdownStrategy();
 
-        assertEq(strategy.totalAssets(), _amount, "!totalAssets");
+        // Deposits are paused but the levered position is untouched
+        assertEq(strategy.maxDeposit(user), 0, "!deposit paused");
+        _assertAtTargetLeverage();
 
-        // Make sure we can still withdraw the full amount
-        uint256 balanceBefore = asset.balanceOf(user);
+        // Skip time to avoid delevering on the same block as the last trove touch
+        skip(1 seconds);
 
-        // Withdraw all funds
-        vm.prank(user);
-        strategy.redeem(_amount, user, user);
+        // The user can still withdraw their full position; the strategy delevers to free it
+        vm.startPrank(user);
+        strategy.redeem(strategy.balanceOf(user), user, user);
+        vm.stopPrank();
+        assertGe(asset.balanceOf(user), _amount, "!user recovered");
 
-        assertGe(asset.balanceOf(user), balanceBefore + _amount, "!final balance");
+        // The remaining seed position is still levered to target
+        _assertAtTargetLeverage();
     }
 
     function test_emergencyWithdraw_maxUint(
@@ -43,35 +52,43 @@ contract ShutdownTest is Setup {
     ) public {
         vm.assume(_amount > minFuzzAmount && _amount < maxFuzzAmount);
 
-        // Deposit into strategy
+        // Seeder shares == its deposit (minted at PPS 1 in setUp)
+        uint256 seederDeposit = strategy.balanceOf(seeder);
+
+        // Deposit and lever up to target
         mintAndDepositIntoStrategy(strategy, user, _amount);
+        vm.prank(keeper);
+        strategy.tend();
+        _assertAtTargetLeverage();
 
-        assertEq(strategy.totalAssets(), _amount, "!totalAssets");
+        // Earn interest and report
+        accrueYield(_amount);
+        vm.prank(keeper);
+        strategy.report();
 
-        // Earn Interest
-        skip(1 days);
+        // Skip time to avoid closing on the same block as the last trove touch
+        skip(1 seconds);
 
-        // Shutdown the strategy
+        // Shut down and emergency-close the whole position into idle asset
         vm.prank(emergencyAdmin);
         strategy.shutdownStrategy();
-
-        assertEq(strategy.totalAssets(), _amount, "!totalAssets");
-
-        // should be able to pass uint 256 max and not revert.
         vm.prank(emergencyAdmin);
         strategy.emergencyWithdraw(type(uint256).max);
 
-        // Make sure we can still withdraw the full amount
-        uint256 balanceBefore = asset.balanceOf(user);
+        // The trove is fully closed: nothing is borrowed and all value is idle
+        assertEq(strategy.balanceOfDebt(), 0, "!debt");
+        assertEq(ITroveManager(troveManager).troves(strategy.troveId()).collateral, 0, "!trove emptied");
 
-        // Withdraw all funds
-        vm.prank(user);
-        strategy.redeem(_amount, user, user);
+        // Both the user and the seeder withdraw and get back at least what they put in
+        vm.startPrank(user);
+        strategy.redeem(strategy.balanceOf(user), user, user);
+        vm.stopPrank();
+        assertGe(asset.balanceOf(user), _amount, "!user recovered");
 
-        assertGe(asset.balanceOf(user), balanceBefore + _amount, "!final balance");
+        vm.startPrank(seeder);
+        strategy.redeem(strategy.balanceOf(seeder), seeder, seeder);
+        vm.stopPrank();
+        assertGe(asset.balanceOf(seeder), seederDeposit, "!seeder recovered");
     }
-
-    // TODO: Add tests for any emergency function added.
-
 
 }

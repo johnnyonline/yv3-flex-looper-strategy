@@ -262,16 +262,22 @@ contract OperationTest is Setup {
         _assertAtTargetLeverage();
 
         uint256 debtBefore = strategy.balanceOfDebt();
+        uint256 leverageBefore = strategy.getCurrentLeverageRatio();
 
         // Redeem our position below MIN_DEBT, turning the trove into a zombie
         simulateCollateralRedemption(true);
         logStrategyStatus("After redemption");
 
-        // Debt fell below MIN_DEBT and supply/borrow are paused, withdraws limited to idle
+        // Debt and leverage fell, supply/borrow are paused, withdraws limited to idle
         assertLt(strategy.balanceOfDebt(), debtBefore, "!debt");
+        assertLt(strategy.getCurrentLeverageRatio(), leverageBefore, "!leverage");
         assertLt(strategy.balanceOfDebt(), strategy.MIN_DEBT(), "!below min debt");
         assertEq(strategy.availableDepositLimit(user), 0, "!deposit paused");
         assertEq(strategy.availableWithdrawLimit(user), strategy.balanceOfAsset(), "!withdraw idle only");
+
+        // A zombie can't be tended out of (recovery is via emergency), so tend must not trigger
+        (bool trigger,) = strategy.tendTrigger();
+        assertFalse(trigger, "!zombie should not trigger tend");
 
         // Earn interest and report while still a zombie
         accrueYield(_amount);
@@ -301,18 +307,176 @@ contract OperationTest is Setup {
         assertGe(asset.balanceOf(seeder), seederDeposit, "!seeder recovered");
     }
 
-    // @todo -- here test operation redemption no zombie
+    function test_operation_redemptionNoZombie(
+        uint256 _amount
+    ) public {
+        _amount = bound(_amount, minFuzzAmount, maxFuzzAmount / 10);
 
-    function test_tendTrigger(uint256 _amount) public {
+        // Seeder shares == its deposit (minted at PPS 1 in setUp)
+        uint256 seederDeposit = strategy.balanceOf(seeder);
+
+        // Deposit and lever up to target
+        mintAndDepositIntoStrategy(strategy, user, _amount);
+        vm.prank(keeper);
+        strategy.tend();
+        _assertAtTargetLeverage();
+
+        uint256 debtBefore = strategy.balanceOfDebt();
+
+        // Redeem part of our position; the trove stays above MIN_DEBT and active
+        simulateCollateralRedemption(false);
+        logStrategyStatus("After redemption");
+
+        // Debt dropped but the trove is still active and open; we are under target now
+        assertLt(strategy.balanceOfDebt(), debtBefore, "!debt");
+        assertGe(strategy.balanceOfDebt(), strategy.MIN_DEBT(), "!above min debt");
+        assertLt(strategy.getCurrentLeverageRatio(), strategy.targetLeverageRatio(), "!under target");
+        assertGt(strategy.availableDepositLimit(user), 0, "!still open");
+
+        // Under target does not auto-trigger; the keeper re-levers manually
+        (bool trigger,) = strategy.tendTrigger();
+        assertFalse(trigger, "!under target should not trigger");
+
+        // Skip time to avoid touching the trove in the same block as the redemption
+        skip(1 seconds);
+
+        // Re-lever back to target
+        vm.prank(keeper);
+        strategy.tend();
+        _assertAtTargetLeverage();
+
+        // Earn interest and report
+        accrueYield(_amount);
+        vm.prank(keeper);
+        strategy.report();
+
+        // Skip time to avoid closing on the same block as the tend
+        skip(1 seconds);
+
+        // Shut down and close the position so the seed (which can't be repaid below MIN_DEBT) can exit
+        vm.prank(emergencyAdmin);
+        strategy.shutdownStrategy();
+        vm.prank(emergencyAdmin);
+        strategy.emergencyWithdraw(type(uint256).max);
+
+        // Both the user and the seeder withdraw and get back at least what they put in
+        vm.startPrank(user);
+        strategy.redeem(strategy.balanceOf(user), user, user);
+        vm.stopPrank();
+        assertGe(asset.balanceOf(user), _amount, "!user recovered");
+
+        vm.startPrank(seeder);
+        strategy.redeem(strategy.balanceOf(seeder), seeder, seeder);
+        vm.stopPrank();
+        assertGe(asset.balanceOf(seeder), seederDeposit, "!seeder recovered");
+    }
+
+    function test_operation_fullLiquidation(
+        uint256 _amount
+    ) public {
+        _amount = bound(_amount, minFuzzAmount, maxFuzzAmount / 10);
+
+        // Deposit and lever up to target
+        mintAndDepositIntoStrategy(strategy, user, _amount);
+        vm.prank(keeper);
+        strategy.tend();
+        _assertAtTargetLeverage();
+
+        // Drop the collateral price so the trove is underwater and fully liquidate it
+        simulateLiquidation(true);
+        logStrategyStatus("After liquidation");
+
+        // Trove is liquidated and emptied (underwater leaves no surplus), supply/borrow paused
+        assertEq(ITroveManager(troveManager).troves(strategy.troveId()).status, 8, "!liquidated");
+        assertEq(ITroveManager(troveManager).troves(strategy.troveId()).collateral, 0, "!trove emptied");
+        assertEq(strategy.availableDepositLimit(user), 0, "!deposit paused");
+
+        // Shut down and recover anything left (nothing, when underwater), then report the loss
+        skip(1 seconds);
+        vm.prank(emergencyAdmin);
+        strategy.shutdownStrategy();
+        vm.prank(emergencyAdmin);
+        strategy.emergencyWithdraw(type(uint256).max);
+
+        vm.prank(management);
+        strategy.setDoHealthCheck(false);
+        vm.prank(keeper);
+        (, uint256 loss) = strategy.report();
+
+        // The liquidation wiped the whole position
+        assertGt(loss, 0, "!loss");
+        assertEq(strategy.totalAssets(), 0, "!wiped");
+    }
+
+    function test_operation_partialLiquidation(
+        uint256 _amount
+    ) public {
+        _amount = bound(_amount, minFuzzAmount, maxFuzzAmount / 10);
+
+        uint256 seederDeposit = strategy.balanceOf(seeder);
+
+        // Deposit and lever up to target
+        mintAndDepositIntoStrategy(strategy, user, _amount);
+        vm.prank(keeper);
+        strategy.tend();
+        _assertAtTargetLeverage();
+
+        uint256 debtBefore = strategy.balanceOfDebt();
+
+        // Partially liquidate (price dips below MCR then recovers); the trove survives, reduced
+        simulateLiquidation(false);
+        logStrategyStatus("After liquidation");
+
+        // Still active and leveraged, but under target after losing collateral
+        assertEq(ITroveManager(troveManager).troves(strategy.troveId()).status, 1, "!active");
+        assertLt(strategy.balanceOfDebt(), debtBefore, "!debt");
+        assertGt(strategy.getCurrentLeverageRatio(), 1e18, "!still leveraged");
+        assertLt(strategy.getCurrentLeverageRatio(), strategy.targetLeverageRatio(), "!under target");
+
+        // A tend brings leverage back to target
+        skip(1 seconds);
+        vm.prank(keeper);
+        strategy.tend();
+        _assertAtTargetLeverage();
+
+        // Wind down so everyone can exit, then report the partial loss
+        skip(1 seconds);
+        vm.prank(emergencyAdmin);
+        strategy.shutdownStrategy();
+        vm.prank(emergencyAdmin);
+        strategy.emergencyWithdraw(type(uint256).max);
+
+        vm.prank(management);
+        strategy.setDoHealthCheck(false);
+        vm.prank(keeper);
+        (, uint256 loss) = strategy.report();
+        assertGt(loss, 0, "!loss");
+
+        // Everyone exits taking a bounded loss (most of the position survived)
+        vm.startPrank(user);
+        strategy.redeem(strategy.balanceOf(user), user, user);
+        vm.stopPrank();
+        assertGt(asset.balanceOf(user), _amount * 40 / 100, "!user loss too big");
+        assertLt(asset.balanceOf(user), _amount, "!user took a loss");
+
+        vm.startPrank(seeder);
+        strategy.redeem(strategy.balanceOf(seeder), seeder, seeder);
+        vm.stopPrank();
+        assertGt(asset.balanceOf(seeder), seederDeposit * 40 / 100, "!seeder loss too big");
+    }
+
+    function test_tendTrigger(
+        uint256 _amount
+    ) public {
         vm.assume(_amount > minFuzzAmount && _amount < maxFuzzAmount);
 
-        (bool trigger, ) = strategy.tendTrigger();
+        (bool trigger,) = strategy.tendTrigger();
         assertTrue(!trigger);
 
         mintAndDepositIntoStrategy(strategy, user, _amount);
 
         // After deposit with idle funds, tend should NOT auto-trigger.
-        (trigger, ) = strategy.tendTrigger();
+        (trigger,) = strategy.tendTrigger();
         assertFalse(trigger, "tend should not auto-trigger after deposit");
 
         // Deploy funds via tend
@@ -320,8 +484,89 @@ contract OperationTest is Setup {
         strategy.tend();
 
         // After tend, should no longer need to tend (within buffer)
-        (trigger, ) = strategy.tendTrigger();
+        (trigger,) = strategy.tendTrigger();
         assertTrue(!trigger, "tend should not be triggered after tending");
+    }
+
+    function test_tendTrigger_overMaxLeverage(
+        uint256 _amount
+    ) public {
+        _amount = bound(_amount, minFuzzAmount, maxFuzzAmount / 10);
+        mintAndDepositIntoStrategy(strategy, user, _amount);
+        vm.prank(keeper);
+        strategy.tend();
+
+        // Lower the max below our current 3x so the position is over max
+        vm.prank(management);
+        strategy.setLeverageParams(2e18, 0.25e18, 2.5e18);
+        assertGt(strategy.getCurrentLeverageRatio(), strategy.maxLeverageRatio(), "!over max");
+
+        // Over max triggers a tend even within the min tend interval
+        (bool trigger,) = strategy.tendTrigger();
+        assertTrue(trigger, "!over max triggers tend");
+    }
+
+    function test_tendTrigger_liquidatable(
+        uint256 _amount
+    ) public {
+        _amount = bound(_amount, minFuzzAmount, maxFuzzAmount / 10);
+        mintAndDepositIntoStrategy(strategy, user, _amount);
+        vm.prank(keeper);
+        strategy.tend();
+
+        // Drop the price below MCR so the position is liquidatable
+        uint256 _price = ITroveManager(troveManager).price_oracle().get_price(true);
+        _setCollateralPrice(_price * 70 / 100);
+        assertGt(strategy.getCurrentLTV(), strategy.getLiquidateCollateralFactor(), "!liquidatable");
+
+        // Liquidatable triggers a tend even within the min tend interval
+        (bool trigger,) = strategy.tendTrigger();
+        assertTrue(trigger, "!liquidatable triggers tend");
+    }
+
+    function test_tendTrigger_overTargetBelowMax(
+        uint256 _amount
+    ) public {
+        _amount = bound(_amount, minFuzzAmount, maxFuzzAmount / 10);
+        mintAndDepositIntoStrategy(strategy, user, _amount);
+        vm.prank(keeper);
+        strategy.tend();
+
+        // Lower the target so 3x is over the buffer but still below max
+        vm.prank(management);
+        strategy.setLeverageParams(2e18, 0.25e18, 5e18);
+
+        // Within the min tend interval it does not auto-trigger...
+        (bool trigger,) = strategy.tendTrigger();
+        assertFalse(trigger, "!should respect interval");
+
+        // ...but after the interval it does (we have borrow capacity to delever)
+        skip(strategy.minTendInterval() + 1);
+        (trigger,) = strategy.tendTrigger();
+        assertTrue(trigger, "!over target triggers after interval");
+    }
+
+    function test_tendTrigger_underTarget(
+        uint256 _amount
+    ) public {
+        _amount = bound(_amount, minFuzzAmount, maxFuzzAmount / 10);
+        mintAndDepositIntoStrategy(strategy, user, _amount);
+        vm.prank(keeper);
+        strategy.tend();
+
+        // Raise the target so 3x is under the lower bound
+        vm.prank(management);
+        strategy.setLeverageParams(4e18, 0.5e18, 6e18);
+        skip(strategy.minTendInterval() + 1);
+
+        // Under target does not auto-trigger (no auto lever-up)
+        assertLt(
+            strategy.getCurrentLeverageRatio(),
+            strategy.targetLeverageRatio() - strategy.leverageBuffer(),
+            "!under target"
+        );
+        (bool trigger,) = strategy.tendTrigger();
+        assertFalse(trigger, "!under target should not trigger");
     }
 
 }

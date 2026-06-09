@@ -68,6 +68,12 @@ interface ITroveManager {
         uint256 debtAmount,
         address receiver
     ) external;
+    function liquidate_trove(
+        uint256 troveId,
+        uint256 maxDebtToRepay,
+        address receiver,
+        bytes calldata data
+    ) external returns (uint256);
     function adjust_interest_rate(
         uint256 troveId,
         uint256 newAnnualInterestRate,

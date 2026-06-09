@@ -206,19 +206,19 @@ contract Setup is Test, IEvents {
         ILender(lender).withdraw(_toRemove, lenderUser, lenderUser);
     }
 
-    /// @dev Redeem as the Lender (Flex redeems lowest-rate Troves first). To reach our Trove we
-    ///      redeem all the debt in front of it plus twice our own debt, dropping it below MIN_DEBT
-    ///      into a zombie. `_inFront` is ~0 when our Trove holds all the debt, so the `* 2` term
-    ///      still redeems it. The Lender redeem frees only what's available, so over-shooting is safe
+    /// @dev Redeem as the Lender (Flex redeems lowest-rate Troves first). We redeem all the debt in
+    ///      front of our Trove, then either twice our debt (dropping it below MIN_DEBT into a zombie)
+    ///      or half our debt (a partial redemption that keeps it active). `_inFront` is ~0 when our
+    ///      Trove holds all the debt, and the Lender redeem frees only what's available, so it's safe
     function simulateCollateralRedemption(
         bool _zombie
     ) internal {
         uint256 _troveId = strategy.troveId();
         uint256 _rate = ITroveManager(troveManager).troves(_troveId).annualInterestRate;
-        uint256 _inFront =
-            IDebtInFrontHelper(strategy.DEBT_IN_FRONT_HELPER()).get_debt_in_front(troveManager, 0, _rate, _troveId, 0, 0);
+        uint256 _inFront = IDebtInFrontHelper(strategy.DEBT_IN_FRONT_HELPER())
+            .get_debt_in_front(troveManager, 0, _rate, _troveId, 0, 0);
 
-        uint256 _amount = _zombie ? _inFront + strategy.balanceOfDebt() * 2 : _inFront / 2;
+        uint256 _amount = _inFront + (_zombie ? strategy.balanceOfDebt() * 2 : strategy.balanceOfDebt() / 2);
 
         vm.prank(lender);
         ITroveManager(troveManager).redeem(_amount, address(this));
@@ -226,6 +226,49 @@ contract Setup is Test, IEvents {
         uint256 _status = ITroveManager(troveManager).troves(_troveId).status;
         if (_zombie) require(_status == 2, "!zombie");
         else require(_status == 1, "!active");
+    }
+
+    /// @dev Mock the collateral oracle to report `_price`
+    function _setCollateralPrice(
+        uint256 _price
+    ) internal {
+        address _oracle = address(ITroveManager(troveManager).price_oracle());
+        vm.mockCall(_oracle, abi.encodeWithSignature("get_price()"), abi.encode(_price));
+        vm.mockCall(_oracle, abi.encodeWithSignature("get_price(bool)"), abi.encode(_price));
+    }
+
+    /// @dev Drop the price and liquidate the strategy's trove (this contract is the liquidator).
+    ///      `_full` drops 40% so the 3x trove is underwater and fully wiped. Otherwise it drops 28%
+    ///      so the trove is just below MCR and only partially liquidated, then the price recovers so
+    ///      the surviving (now under-levered) trove stays active and can be re-levered
+    function simulateLiquidation(
+        bool _full
+    ) internal {
+        uint256 _price = ITroveManager(troveManager).price_oracle().get_price(true);
+        _setCollateralPrice(_price * (_full ? 60 : 72) / 100);
+
+        ITroveManager(troveManager)
+            .liquidate_trove(strategy.troveId(), type(uint256).max, address(this), abi.encode(uint256(420)));
+
+        uint256 _status = ITroveManager(troveManager).troves(strategy.troveId()).status;
+        if (_full) {
+            require(_status == 8, "!liquidated");
+        } else {
+            require(_status == 1, "!active");
+            _setCollateralPrice(_price);
+        }
+    }
+
+    /// @dev Liquidator callback: fund the repayment and approve the Trove Manager to pull it
+    function takeCallback(
+        uint256,
+        address,
+        uint256,
+        uint256 _neededAmount,
+        bytes calldata
+    ) external {
+        deal(address(asset), address(this), _neededAmount);
+        asset.forceApprove(msg.sender, _neededAmount);
     }
 
     function _defaultMaxAmountToSwap() internal view virtual returns (uint256) {

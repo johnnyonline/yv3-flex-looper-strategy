@@ -42,7 +42,7 @@ contract Strategy is BaseLooper {
     /// @notice The market's minimum debt
     uint256 public immutable MIN_DEBT;
 
-    /// @notice The market's minimum collateral ratio (WAD, e.g. 1.1e18)
+    /// @notice The market's minimum collateral ratio
     uint256 public immutable MCR;
 
     /// @notice Dust added to a redemption borrow to absorb the redeemed-collateral round-trip rounding

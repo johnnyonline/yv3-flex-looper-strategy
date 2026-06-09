@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0
-pragma solidity 0.8.23;
+pragma solidity ^0.8.18;
 
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
@@ -45,6 +45,9 @@ abstract contract BaseLooper is BaseHealthCheck {
     struct FlashLoanData {
         FlashLoanOperation operation;
         uint256 amount; // Amount to deploy or free (in asset terms)
+        // ---- (FLEX) ADDED (same-block double-repay fix) ----
+        uint256 repayAmount; // DELEVERAGE only: total debt to repay (idle + flashloan)
+        // ---- END ADDED ----
     }
 
     /// @notice Governance address allowed to update exchange configuration.
@@ -439,7 +442,10 @@ abstract contract BaseLooper is BaseHealthCheck {
     ) internal virtual {
         lastTend = block.timestamp;
         (uint256 currentCollateralValue, uint256 currentDebt) = position();
-        uint256 currentEquity = currentCollateralValue - currentDebt + _amount;
+
+        uint256 maxSupply = maxSupplyInAsset();
+
+        uint256 currentEquity = currentCollateralValue - currentDebt + Math.min(_amount, maxSupply);
         (, uint256 targetDebt) = getTargetPosition(currentEquity);
 
         if (targetDebt > currentDebt) {
@@ -447,13 +453,6 @@ abstract contract BaseLooper is BaseHealthCheck {
 
             uint256 maxBorrow = Math.min(maxFlashloan(), _maxBorrowAmount());
             if (flashloanAmount > maxBorrow) flashloanAmount = maxBorrow;
-
-            uint256 maxSupply = _collateralToAsset(_maxCollateralDeposit());
-            if (maxSupply != type(uint256).max) {
-                maxSupply = Math.min(maxAmountToSwap, (maxSupply * (MAX_BPS - slippage)) / MAX_BPS);
-            } else {
-                maxSupply = maxAmountToSwap;
-            }
 
             if (_amount + flashloanAmount > maxSupply) {
                 if (_amount >= maxSupply) {
@@ -469,7 +468,13 @@ abstract contract BaseLooper is BaseHealthCheck {
                 return;
             }
 
-            bytes memory data = abi.encode(FlashLoanData({operation: FlashLoanOperation.LEVERAGE, amount: _amount}));
+            bytes memory data = abi.encode(
+                FlashLoanData({
+                    operation: FlashLoanOperation.LEVERAGE,
+                    amount: _amount,
+                    repayAmount: 0 // ---- (FLEX) ADDED: unused for LEVERAGE ----
+                })
+            );
 
             _executeFlashloan(address(asset), flashloanAmount, data);
         } else if (currentDebt > targetDebt) {
@@ -479,35 +484,59 @@ abstract contract BaseLooper is BaseHealthCheck {
             if (_amount >= debtToRepay) {
                 // _amount covers the debt repayment, just repay and supply the rest
                 _repay(debtToRepay);
-                if (targetLeverageRatio == 0) _withdrawAndConvertCollateral();
-                else _convertAndSupplyCollateral(_amount - debtToRepay);
+                if (targetLeverageRatio == 0) {
+                    _withdrawAndConvertCollateral();
+                } else {
+                    _convertAndSupplyCollateral(Math.min(_amount - debtToRepay, maxSupply));
+                }
                 return;
             }
 
-            // First repay what is loose.
-            _repay(_amount);
-            debtToRepay -= _amount;
-            currentDebt -= _amount;
+            // ---- (FLEX)FIX (same-block double-repay) ----
+            // Was: repay the loose `_amount` HERE, then repay the flashloan inside the
+            // callback -> two debt updates in one block, which Flex rejects ("same block"):
+            //
+            //     _repay(_amount);
+            //     currentDebt = balanceOfDebt();
+            //     debtToRepay = currentDebt - targetDebt;
+            //
+            // Now: flashloan only the shortfall and repay idle + flashloan in a SINGLE repay
+            // inside the callback (via `repayAmount`). Same flashloan size, same target landing.
+            uint256 flashloanAmount = debtToRepay - _amount;
 
             // Cap flashloan by available liquidity and maxAmountToSwap
             uint256 maxDebtToRepay = Math.min(maxAmountToSwap, maxFlashloan());
 
-            if (debtToRepay > maxDebtToRepay) debtToRepay = maxDebtToRepay;
+            if (flashloanAmount > maxDebtToRepay) flashloanAmount = maxDebtToRepay;
 
-            if (debtToRepay <= minAmountToBorrow) return;
+            if (flashloanAmount <= minAmountToBorrow) {
+                // Shortfall too small to flashloan; repay just the loose idle (single repay).
+                _repay(_amount);
+                return;
+            }
 
-            // Gross up by inverse slippage so worst-case output still covers the flashloan.
-            uint256 collateralToWithdraw = debtToRepay == currentDebt && targetLeverageRatio == 0
-                ? balanceOfCollateral()
-                : (_assetToCollateral(debtToRepay) * MAX_BPS) / (MAX_BPS - slippage);
+            uint256 collateralToWithdraw;
+            if (targetLeverageRatio == 0) {
+                // If target = 0 withdraw max respecting caps.
+                collateralToWithdraw = Math.min(balanceOfCollateral(), _assetToCollateral(maxAmountToSwap));
+            } else {
+                // Gross up by inverse slippage so worst-case output still covers the flashloan.
+                collateralToWithdraw = (_assetToCollateral(flashloanAmount) * MAX_BPS) / (MAX_BPS - slippage);
+            }
 
-            bytes memory data =
-                abi.encode(FlashLoanData({operation: FlashLoanOperation.DELEVERAGE, amount: collateralToWithdraw}));
-            _executeFlashloan(address(asset), debtToRepay, data);
+            bytes memory data = abi.encode(
+                FlashLoanData({
+                    operation: FlashLoanOperation.DELEVERAGE,
+                    amount: collateralToWithdraw,
+                    repayAmount: _amount + flashloanAmount // idle + flashloan, one repay
+                })
+            );
+            _executeFlashloan(address(asset), flashloanAmount, data);
+            // ---- (FLEX) END FIX ----
         } else {
             // CASE 3: At target debt
             if (targetLeverageRatio == 0) _withdrawAndConvertCollateral();
-            else _convertAndSupplyCollateral(_amount);
+            else _convertAndSupplyCollateral(Math.min(_amount, maxSupply));
         }
     }
 
@@ -535,7 +564,7 @@ abstract contract BaseLooper is BaseHealthCheck {
 
         (, uint256 targetDebt) = equity > _amountNeeded ? getTargetPosition(equity - _amountNeeded) : (0, 0);
 
-        if (currentDebt == 0 || targetDebt > currentDebt) {
+        if (currentDebt == 0 || targetDebt >= currentDebt) {
             // No debt, just withdraw collateral
             uint256 toWithdraw = _assetToCollateral(_amountNeeded);
             _withdrawCollateral(Math.min(toWithdraw, balanceOfCollateral()));
@@ -547,13 +576,16 @@ abstract contract BaseLooper is BaseHealthCheck {
 
         require(debtToRepay <= maxFlashloan(), "!liquidity");
 
-        if (debtToRepay == 0) return;
-
         uint256 collateralToWithdraw =
             debtToRepay == currentDebt ? balanceOfCollateral() : _assetToCollateral(debtToRepay + _amountNeeded);
 
-        bytes memory data =
-            abi.encode(FlashLoanData({operation: FlashLoanOperation.DELEVERAGE, amount: collateralToWithdraw}));
+        bytes memory data = abi.encode(
+            FlashLoanData({
+                operation: FlashLoanOperation.DELEVERAGE,
+                amount: collateralToWithdraw,
+                repayAmount: debtToRepay // ---- (FLEX) ADDED: withdraw path repays exactly the flashloan ----
+            })
+        );
 
         _executeFlashloan(address(asset), debtToRepay, data);
     }
@@ -566,7 +598,7 @@ abstract contract BaseLooper is BaseHealthCheck {
         FlashLoanData memory params = abi.decode(data, (FlashLoanData));
 
         if (params.operation == FlashLoanOperation.LEVERAGE) _executeLeverageCallback(assets, params);
-        else if (params.operation == FlashLoanOperation.DELEVERAGE) _executeDeleverageCallback(assets, params);
+        else if (params.operation == FlashLoanOperation.DELEVERAGE) _executeDeleverageCallback(params);
         else revert("invalid operation");
     }
 
@@ -591,13 +623,14 @@ abstract contract BaseLooper is BaseHealthCheck {
     }
 
     function _executeDeleverageCallback(
-        uint256 flashloanAmount,
         FlashLoanData memory params
     ) internal virtual {
         uint256 initialLeverage = getCurrentLeverageRatio();
 
-        // Use flashloaned amount to repay debt
-        _repay(Math.min(flashloanAmount, balanceOfDebt()));
+        // ---- (FLEX)FIX (same-block double-repay): repay idle + flashloan in ONE repay ----
+        // Was: _repay(Math.min(flashloanAmount, balanceOfDebt()));
+        _repay(Math.min(params.repayAmount, balanceOfDebt()));
+        // ---- (FLEX) END FIX ----
 
         uint256 collateralToWithdraw = Math.min(params.amount, balanceOfCollateral());
         // Withdraw
@@ -768,6 +801,13 @@ abstract contract BaseLooper is BaseHealthCheck {
         if (assetAmount == 0 || assetAmount == type(uint256).max) return assetAmount;
         uint256 price = _getCollateralPrice();
         return (assetAmount * ORACLE_PRICE_SCALE) / price;
+    }
+
+    /// @notice Max asset amount that can be converted and supplied in one lever-up step.
+    function maxSupplyInAsset() public view virtual returns (uint256) {
+        uint256 maxSupply = _isSupplyPaused() ? 0 : _collateralToAsset(_maxCollateralDeposit());
+        if (maxSupply != type(uint256).max) maxSupply = (maxSupply * (MAX_BPS - slippage)) / MAX_BPS;
+        return Math.min(maxSupply, maxAmountToSwap);
     }
 
     /// @notice Get current leverage ratio
