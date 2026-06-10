@@ -2,6 +2,7 @@ pragma solidity ^0.8.18;
 
 import "forge-std/console2.sol";
 import {Setup} from "./utils/Setup.sol";
+import {ITroveManager} from "../interfaces/ITroveManager.sol";
 
 import {StrategyAprOracle} from "../periphery/StrategyAprOracle.sol";
 
@@ -17,39 +18,20 @@ contract OracleTest is Setup {
     function checkOracle(
         address _strategy,
         uint256 _delta
-    ) public {
-        // Check set up
-        // TODO: Add checks for the setup
-
+    ) public view {
         uint256 currentApr = oracle.aprAfterDebtChange(_strategy, 0);
+        console2.log("Current APR:", currentApr);
 
         // Should be greater than 0 but likely less than 100%
         assertGt(currentApr, 0, "ZERO");
         assertLt(currentApr, 1e18, "+100%");
 
-        // TODO: Uncomment to test the apr goes up and down based on debt changes
-        /**
-         * uint256 negativeDebtChangeApr = oracle.aprAfterDebtChange(_strategy, -int256(_delta));
-         *
-         *     // The apr should go up if deposits go down
-         *     assertLt(currentApr, negativeDebtChangeApr, "negative change");
-         *
-         *     uint256 positiveDebtChangeApr = oracle.aprAfterDebtChange(_strategy, int256(_delta));
-         *
-         *     assertGt(currentApr, positiveDebtChangeApr, "positive change");
-         */
+        // Depositing dilutes the collateral vault's APR, withdrawing concentrates it
+        uint256 negativeDebtChangeApr = oracle.aprAfterDebtChange(_strategy, -int256(_delta));
+        assertGe(negativeDebtChangeApr, currentApr, "negative change");
 
-        // TODO: Uncomment if there are setter functions to test.
-        /**
-         * vm.expectRevert("!governance");
-         *     vm.prank(user);
-         *     oracle.setterFunction(setterVariable);
-         *
-         *     vm.prank(management);
-         *     oracle.setterFunction(setterVariable);
-         *
-         *     assertEq(oracle.setterVariable(), setterVariable);
-         */
+        uint256 positiveDebtChangeApr = oracle.aprAfterDebtChange(_strategy, int256(_delta));
+        assertLe(positiveDebtChangeApr, currentApr, "positive change");
     }
 
     function test_oracle(
@@ -59,14 +41,19 @@ contract OracleTest is Setup {
         vm.assume(_amount > minFuzzAmount && _amount < maxFuzzAmount);
         _percentChange = uint16(bound(uint256(_percentChange), 10, MAX_BPS));
 
+        // At the seed Trove's high rate the loop carries negative, so the APR floors at 0
+        assertEq(oracle.aprAfterDebtChange(address(strategy), 0), 0, "!negative carry");
+
+        // Drop the Trove rate to the minimum so the loop earns a positive spread
+        uint256 _minRate = ITroveManager(troveManager).min_annual_interest_rate();
+        vm.prank(keeper);
+        strategy.adjustInterestRate(_minRate, 0, 0, type(uint256).max);
+
         mintAndDepositIntoStrategy(strategy, user, _amount);
 
         uint256 _delta = (_amount * _percentChange) / MAX_BPS;
 
         checkOracle(address(strategy), _delta);
     }
-
-    // TODO: Deploy multiple strategies with different tokens as `asset` to test against the oracle.
-
 
 }
