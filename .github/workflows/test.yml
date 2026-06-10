@@ -15,20 +15,37 @@ jobs:
     name: Foundry project
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@f43a0e5ff2bd294095638e18286ca9a3d1956744 # v3
+      - uses: actions/checkout@v4
         with:
           submodules: recursive
 
       - name: Install Foundry
-        uses: foundry-rs/foundry-toolchain@c7450ba673e133f5ee30098b3b54f444d3a2ca2d # v1
+        uses: foundry-rs/foundry-toolchain@v1
         with:
           version: nightly
+      
+      - name: Clean lib
+        run: rm -rf lib
+      
+      - name: Create .env file
+        run: echo "ETH_RPC_URL=${{ secrets.ETH_RPC_URL }}" > .env
 
-      - name: Run Forge build
-        run: |
-          forge --version
-          forge build --sizes
-        id: build
+      # - name: Run Forge build
+      #   run: |
+      #     forge --version
+      #     forge build --sizes
+      #   id: build
+
+      # - name: Run Forge fmt
+      #   run: |
+      #     forge fmt --check
+      #   id: fmt
+
+      - name: Install Foundry deps
+        run: forge install
+
+      - name: Show remappings
+        run: forge remappings
 
       - name: Run Forge tests
         run: |
