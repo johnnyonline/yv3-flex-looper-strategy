@@ -12,7 +12,7 @@ import {IStrategyInterface} from "../../interfaces/IStrategyInterface.sol";
 import {ITroveManager} from "../../interfaces/ITroveManager.sol";
 import {IDebtInFrontHelper} from "../../interfaces/IDebtInFrontHelper.sol";
 
-import {ExchangeMock} from "../mocks/ExchangeMock.sol";
+import {yvUSDToUSDCExchange} from "../../periphery/yvUSDToUSDCExchange.sol";
 
 // Inherit the events so they can be checked if desired.
 import {IEvents} from "@tokenized-strategy/interfaces/IEvents.sol";
@@ -113,7 +113,7 @@ contract Setup is Test, IEvents {
 
         strategyFactory = new StrategyFactory(management, performanceFeeRecipient, keeper, emergencyAdmin);
 
-        exchange = address(new ExchangeMock(address(asset), yvusd, address(ITroveManager(troveManager).price_oracle())));
+        exchange = _deployExchange();
 
         // Seed borrow liquidity so the market can serve borrows during levering.
         _seedLenderLiquidity(LENDER_LIQUIDITY_SEED);
@@ -134,6 +134,11 @@ contract Setup is Test, IEvents {
         vm.label(troveManager, "troveManager");
         vm.label(address(strategy), "strategy");
         vm.label(performanceFeeRecipient, "performanceFeeRecipient");
+    }
+
+    /// @dev Override to swap the real exchange for the configurable mock
+    function _deployExchange() internal virtual returns (address) {
+        return address(new yvUSDToUSDCExchange());
     }
 
     function setUpStrategy() public returns (address) {
