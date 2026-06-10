@@ -2,7 +2,7 @@
   "lib/forge-std": {
     "branch": {
       "name": "master",
-      "rev": "fc560fa34fa12a335a50c35d92e55a6628ca467c"
+      "rev": "6bce1540c7a5d1c40eec032a1ae16f0e01f82b92"
     }
   },
   "lib/openzeppelin-contracts": {
@@ -15,6 +15,6 @@
     "rev": "82806289f967590c4efbf6bc3d237e4e7f0a0966"
   },
   "lib/tokenized-strategy-periphery": {
-    "rev": "c0dfe4a563a45efb72718547e840429b3a6092e6"
+    "rev": "3624e0421d1765997a6e6751a4bd086ab69cfe02"
   }
 }
