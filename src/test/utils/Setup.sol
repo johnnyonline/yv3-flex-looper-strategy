@@ -137,8 +137,16 @@ contract Setup is Test, IEvents {
     }
 
     function setUpStrategy() public returns (address) {
+        IStrategyInterface _strategy = _deployStrategy();
+
+        _openInitialTrove(_strategy);
+
+        return address(_strategy);
+    }
+
+    function _deployStrategy() internal returns (IStrategyInterface _strategy) {
         // we save the strategy as a IStrategyInterface to give it the needed interface
-        IStrategyInterface _strategy = IStrategyInterface(
+        _strategy = IStrategyInterface(
             address(
                 strategyFactory.newStrategy(
                     address(asset), // _asset
@@ -146,7 +154,7 @@ contract Setup is Test, IEvents {
                     "Flex Looper", // _name
                     troveManager, // _troveManager
                     exchange, // _exchange
-                    true // _allowRedemption
+                    _allowRedemption() // _allowRedemption
                 )
             )
         );
@@ -158,10 +166,11 @@ contract Setup is Test, IEvents {
         _strategy.setMaxGasPriceToTend(type(uint256).max);
         _strategy.setProfitMaxUnlockTime(0);
         vm.stopPrank();
+    }
 
-        _openInitialTrove(_strategy);
-
-        return address(_strategy);
+    /// @dev Override to deploy the strategy with redemption disabled
+    function _allowRedemption() internal view virtual returns (bool) {
+        return true;
     }
 
     /// @dev Donate a small asset seed to the strategy and open the trove at MIN_DEBT.
@@ -244,7 +253,7 @@ contract Setup is Test, IEvents {
     function simulateLiquidation(
         bool _full
     ) internal {
-        uint256 _price = ITroveManager(troveManager).price_oracle().get_price(true);
+        uint256 _price = ITroveManager(troveManager).price_oracle().get_price();
         _setCollateralPrice(_price * (_full ? 60 : 72) / 100);
 
         ITroveManager(troveManager)

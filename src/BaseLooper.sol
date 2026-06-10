@@ -484,15 +484,12 @@ abstract contract BaseLooper is BaseHealthCheck {
             if (_amount >= debtToRepay) {
                 // _amount covers the debt repayment, just repay and supply the rest
                 _repay(debtToRepay);
-                if (targetLeverageRatio == 0) {
-                    _withdrawAndConvertCollateral();
-                } else {
-                    _convertAndSupplyCollateral(Math.min(_amount - debtToRepay, maxSupply));
-                }
+                if (targetLeverageRatio == 0) _withdrawAndConvertCollateral();
+                else _convertAndSupplyCollateral(Math.min(_amount - debtToRepay, maxSupply));
                 return;
             }
 
-            // ---- (FLEX)FIX (same-block double-repay) ----
+            // ---- (FLEX) FIX (same-block double-repay) ----
             // Was: repay the loose `_amount` HERE, then repay the flashloan inside the
             // callback -> two debt updates in one block, which Flex rejects ("same block"):
             //
@@ -627,7 +624,7 @@ abstract contract BaseLooper is BaseHealthCheck {
     ) internal virtual {
         uint256 initialLeverage = getCurrentLeverageRatio();
 
-        // ---- (FLEX)FIX (same-block double-repay): repay idle + flashloan in ONE repay ----
+        // ---- (FLEX) FIX (same-block double-repay): repay idle + flashloan in ONE repay ----
         // Was: _repay(Math.min(flashloanAmount, balanceOfDebt()));
         _repay(Math.min(params.repayAmount, balanceOfDebt()));
         // ---- (FLEX) END FIX ----
@@ -898,12 +895,15 @@ abstract contract BaseLooper is BaseHealthCheck {
                         MANAGEMENT FUNCTIONS
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Emergency full position close via flashloan
-    function manualFullUnwind() external accrue onlyEmergencyAuthorized {
-        // Set leverage target to 0..
-        _setLeverageParams(0, 0, 1e18);
-        _withdrawFunds(type(uint256).max);
-    }
+    // ---- (FLEX) REMOVED: a full unwind can't repay below MIN_DEBT without closing the
+    // trove, so it must go through shutdown + emergencyWithdraw instead ----
+    // /// @notice Emergency full position close via flashloan
+    // function manualFullUnwind() external accrue onlyEmergencyAuthorized {
+    //     // Set leverage target to 0..
+    //     _setLeverageParams(0, 0, 1e18);
+    //     _withdrawFunds(type(uint256).max);
+    // }
+    // ---- END REMOVED ----
 
     function manualDelever(
         uint256 amount

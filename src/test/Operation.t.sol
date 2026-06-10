@@ -4,6 +4,8 @@ pragma solidity ^0.8.18;
 import "forge-std/console2.sol";
 import {Setup, ERC20, IStrategyInterface} from "./utils/Setup.sol";
 import {ITroveManager} from "../interfaces/ITroveManager.sol";
+import {IDutchDesk} from "../interfaces/IDutchDesk.sol";
+import {ExchangeMock} from "./mocks/ExchangeMock.sol";
 
 contract OperationTest is Setup {
 
@@ -465,6 +467,26 @@ contract OperationTest is Setup {
         assertGt(asset.balanceOf(seeder), seederDeposit * 40 / 100, "!seeder loss too big");
     }
 
+    function test_operation_auctionTakeWithLoss(
+        uint256 _amount,
+        uint256 _keep
+    ) public {
+        _amount = bound(_amount, minFuzzAmount, maxFuzzAmount / 10);
+        _keep = bound(_keep, 0, _amount);
+
+        // Lossy collateral -> asset swaps only, within the strategy's slippage tolerance
+        ExchangeMock(exchange).setSlippage(0, 10);
+
+        // Not enough idle, so the borrow must redeem and take the auction
+        _drainLenderIdle(_keep);
+        mintAndDepositIntoStrategy(strategy, user, _amount);
+
+        // The auction-take step reverts bc we don't have enough assets to pay what's needed to take the auction
+        vm.prank(keeper);
+        vm.expectRevert();
+        strategy.tend();
+    }
+
     function test_tendTrigger(
         uint256 _amount
     ) public {
@@ -515,7 +537,7 @@ contract OperationTest is Setup {
         strategy.tend();
 
         // Drop the price below MCR so the position is liquidatable
-        uint256 _price = ITroveManager(troveManager).price_oracle().get_price(true);
+        uint256 _price = ITroveManager(troveManager).price_oracle().get_price();
         _setCollateralPrice(_price * 70 / 100);
         assertGt(strategy.getCurrentLTV(), strategy.getLiquidateCollateralFactor(), "!liquidatable");
 

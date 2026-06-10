@@ -84,12 +84,13 @@ contract Strategy is BaseLooper {
     // Constructor
     // ===============================================================
 
-    /// @param _asset The borrow token (e.g. USDC)
-    /// @param _name Strategy name for BaseLooper events
+    /// @param _asset The borrow token
+    /// @param _collateraltoken The collateral token
+    /// @param _name Strategy name
     /// @param _troveManager The Flex Trove Manager contract
     /// @param _exchange The exchange address for collateral <--> asset swaps
-    /// @param _allowRedemption Whether borrows may redeem (vault-redeem markets only)
-    /// @param _governance The address with management permissions (e.g. for opening the trove)
+    /// @param _allowRedemption Whether borrows may trigger a collateral redemption
+    /// @param _governance The address allowed to update exchange configuration
     constructor(
         address _asset,
         address _collateraltoken,
@@ -111,8 +112,11 @@ contract Strategy is BaseLooper {
         AUCTION = DUTCH_DESK.auction();
         ORACLE = TROVE_MANAGER.price_oracle();
 
+        // Make sure the auction's starting price buffer is 0% if we allow redemptions
+        if (ALLOW_REDEMPTION) require(DUTCH_DESK.starting_price_buffer_percentage() == WAD, "!buffer");
+
         // Set market parameters from the Trove Manager
-        // Flex scales `minimum_collateral_ratio` by borrow-token precision, not WAD, convert it
+        // Flex scales `minimum_collateral_ratio` by borrow-token precision, convert it to WAD
         MIN_DEBT = TROVE_MANAGER.min_debt();
         MCR = TROVE_MANAGER.minimum_collateral_ratio() * WAD / 10 ** IERC20Metadata(_asset).decimals();
 
@@ -120,7 +124,7 @@ contract Strategy is BaseLooper {
         ERC20(_collateraltoken).forceApprove(_troveManager, type(uint256).max);
         ERC20(_asset).forceApprove(_troveManager, type(uint256).max);
 
-        // Max approve Morpho to pull the flash-loan repayment
+        // Max approve Morpho to pull the flashloan repayment
         ERC20(_asset).forceApprove(address(MORPHO), type(uint256).max);
     }
 
@@ -175,6 +179,19 @@ contract Strategy is BaseLooper {
     // Flash loan
     // ===============================================================
 
+    /// @notice Morpho flashloan callback
+    /// @dev Only callable by Morpho contract during flashLoan execution
+    function onMorphoFlashLoan(
+        uint256 _assets,
+        bytes calldata _data
+    ) external {
+        require(msg.sender == address(MORPHO), "!morpho");
+        require(_isFlashloanActive, "!active");
+
+        // Emergency close passes empty data, lever/delever pass an encoded FlashLoanData struct
+        _data.length == 0 ? _handleClose() : _onFlashloanReceived(_assets, _data);
+    }
+
     /// @inheritdoc BaseLooper
     function _executeFlashloan(
         address _token,
@@ -186,18 +203,6 @@ contract Strategy is BaseLooper {
         _isFlashloanActive = false;
     }
 
-    /// @notice Morpho flashloan callback
-    /// @dev Only callable by Morpho contract during flashLoan execution
-    function onMorphoFlashLoan(
-        uint256 _assets,
-        bytes calldata _data
-    ) external {
-        require(msg.sender == address(MORPHO), "!morpho");
-        require(_isFlashloanActive, "!active");
-        // Emergency close passes empty data, lever/delever pass an encoded FlashLoanData struct
-        _data.length == 0 ? _handleClose() : _onFlashloanReceived(_assets, _data);
-    }
-
     /// @inheritdoc BaseLooper
     function maxFlashloan() public view override returns (uint256) {
         return asset.balanceOf(address(MORPHO));
@@ -207,7 +212,7 @@ contract Strategy is BaseLooper {
     // Protocol Views
     // ===============================================================
 
-    /// @notice For a target borrow, the amount to borrow and the minimum amounts out to enforce
+    /// @notice For a target borrow, get the amount to borrow and the minimum amounts out to enforce
     /// @dev On a redemption we increase the borrow by a dust amount to ensure we can repay
     ///      the flashloan and not fall short because of floor rounding when taking the auction
     /// @param _amount The amount we ultimately need delivered
@@ -311,7 +316,7 @@ contract Strategy is BaseLooper {
 
     /// @inheritdoc BaseLooper
     function _getCollateralPrice() internal view override returns (uint256) {
-        return ORACLE.get_price(true);
+        return ORACLE.get_price();
     }
 
     // ===============================================================
@@ -327,6 +332,15 @@ contract Strategy is BaseLooper {
     // Emergency
     // ===============================================================
 
+    /// @notice Handles the close in an emergency, with or without a preceding flashloan
+    function _handleClose() internal {
+        uint256 _troveId = troveId;
+        uint256 _status = TROVE_MANAGER.troves(_troveId).status;
+        if (_status == _STATUS_ACTIVE) TROVE_MANAGER.close_trove(_troveId);
+        else if (_status == _STATUS_ZOMBIE) TROVE_MANAGER.close_zombie_trove(_troveId);
+        _convertCollateralToAsset(balanceOfCollateralToken());
+    }
+
     /// @inheritdoc BaseLooper
     function _emergencyWithdraw(
         uint256 /*_amount*/
@@ -341,15 +355,6 @@ contract Strategy is BaseLooper {
             : _handleClose();
     }
 
-    /// @notice Handles the close in an emergency, with or without a preceding flashloan
-    function _handleClose() internal {
-        uint256 _troveId = troveId;
-        uint256 _status = TROVE_MANAGER.troves(_troveId).status;
-        if (_status == _STATUS_ACTIVE) TROVE_MANAGER.close_trove(_troveId);
-        else if (_status == _STATUS_ZOMBIE) TROVE_MANAGER.close_zombie_trove(_troveId);
-        _convertCollateralToAsset(balanceOfCollateralToken());
-    }
-
     // ===============================================================
     // Manage Trove
     // ===============================================================
@@ -358,8 +363,8 @@ contract Strategy is BaseLooper {
     /// @dev Swaps idle asset into collateral and opens the Trove at `MIN_DEBT` (plus redemption
     ///      dust if the open has to redeem). If redemption is enabled, takes the kicked auction atomically
     /// @param _annualInterestRate The initial annual interest rate for the Trove
-    /// @param _prevId Sorted-troves insertion hint (computed off-chain)
-    /// @param _nextId Sorted-troves insertion hint (computed off-chain)
+    /// @param _prevId Sorted-troves insertion hint (computed offchain)
+    /// @param _nextId Sorted-troves insertion hint (computed offchain)
     /// @param _maxUpfrontFee The maximum upfront fee to pay to open the Trove
     function openTrove(
         uint256 _annualInterestRate,
@@ -392,8 +397,8 @@ contract Strategy is BaseLooper {
 
     /// @notice Adjust the Trove's annual interest rate
     /// @param _newAnnualInterestRate The new annual interest rate to set
-    /// @param _prevId Sorted-troves insertion hint (computed off-chain)
-    /// @param _nextId Sorted-troves insertion hint (computed off-chain)
+    /// @param _prevId Sorted-troves insertion hint (computed offchain)
+    /// @param _nextId Sorted-troves insertion hint (computed offchain)
     /// @param _maxUpfrontFee The maximum upfront fee to pay for the adjustment
     function adjustInterestRate(
         uint256 _newAnnualInterestRate,
@@ -420,18 +425,6 @@ contract Strategy is BaseLooper {
     // Redemption auction taking
     // ===============================================================
 
-    /// @notice Take the redemption auction if it was kicked by the preceding borrow
-    /// @param _nonceBefore The nonce of the Dutch Desk before the borrow.
-    ///        If it differs from the current nonce, the auction was kicked and should be taken
-    function _takeAuctionIfKicked(
-        uint256 _nonceBefore
-    ) internal {
-        if (DUTCH_DESK.nonce() == _nonceBefore) return;
-        _isTakingAuction = true;
-        AUCTION.take(_nonceBefore, type(uint256).max, address(this), abi.encode(uint256(420)));
-        _isTakingAuction = false;
-    }
-
     /// @notice Callback function for the auction when taking a redemption
     /// @param _taker The address of the taker
     /// @param _amountTaken The amount of collateral taken by the auction
@@ -448,6 +441,18 @@ contract Strategy is BaseLooper {
 
         _convertCollateralToAsset(_amountTaken);
         asset.forceApprove(address(AUCTION), _neededAmount);
+    }
+
+    /// @notice Take the redemption auction if it was kicked by the preceding borrow
+    /// @param _nonceBefore The nonce of the Dutch Desk before the borrow.
+    ///        If it differs from the current nonce, the auction was kicked and should be taken
+    function _takeAuctionIfKicked(
+        uint256 _nonceBefore
+    ) internal {
+        if (DUTCH_DESK.nonce() == _nonceBefore) return;
+        _isTakingAuction = true;
+        AUCTION.take(_nonceBefore, type(uint256).max, address(this), abi.encode(uint256(420)));
+        _isTakingAuction = false;
     }
 
 }
