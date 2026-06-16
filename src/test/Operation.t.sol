@@ -293,6 +293,10 @@ contract OperationTest is Setup {
         vm.prank(emergencyAdmin);
         strategy.emergencyWithdraw(type(uint256).max);
 
+        // Realize the equity the partial-conversion close left as loose collateral
+        vm.prank(emergencyAdmin);
+        strategy.convertCollateralToAsset(type(uint256).max);
+
         assertEq(ITroveManager(troveManager).troves(strategy.troveId()).collateral, 0, "!trove emptied");
 
         // Both the user and the seeder withdraw and get back at least what they put in
@@ -358,6 +362,10 @@ contract OperationTest is Setup {
         strategy.shutdownStrategy();
         vm.prank(emergencyAdmin);
         strategy.emergencyWithdraw(type(uint256).max);
+
+        // Realize the equity the partial-conversion close left as loose collateral
+        vm.prank(emergencyAdmin);
+        strategy.convertCollateralToAsset(type(uint256).max);
 
         // Both the user and the seeder withdraw and get back at least what they put in
         vm.startPrank(user);
@@ -445,6 +453,10 @@ contract OperationTest is Setup {
         strategy.shutdownStrategy();
         vm.prank(emergencyAdmin);
         strategy.emergencyWithdraw(type(uint256).max);
+
+        // Realize the equity the partial-conversion close left as loose collateral
+        vm.prank(emergencyAdmin);
+        strategy.convertCollateralToAsset(type(uint256).max);
 
         vm.prank(management);
         strategy.setDoHealthCheck(false);

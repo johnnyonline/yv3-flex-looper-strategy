@@ -96,6 +96,10 @@ abstract contract BaseShutdownTest is Setup {
         vm.prank(emergencyAdmin);
         strategy.emergencyWithdraw(type(uint256).max);
 
+        // Realize the equity the partial-conversion close left as loose collateral
+        vm.prank(emergencyAdmin);
+        strategy.convertCollateralToAsset(type(uint256).max);
+
         vm.prank(management);
         strategy.setDoHealthCheck(false);
 

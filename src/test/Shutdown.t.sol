@@ -69,11 +69,15 @@ contract ShutdownTest is Setup {
         // Skip time to avoid closing on the same block as the last trove touch
         skip(1 seconds);
 
-        // Shut down and emergency-close the whole position into idle asset
+        // Shut down and emergency-close the Trove; the partial-conversion close leaves equity loose
         vm.prank(emergencyAdmin);
         strategy.shutdownStrategy();
         vm.prank(emergencyAdmin);
         strategy.emergencyWithdraw(type(uint256).max);
+
+        // Realize the equity the close left as loose collateral
+        vm.prank(emergencyAdmin);
+        strategy.convertCollateralToAsset(type(uint256).max);
 
         // The trove is fully closed: nothing is borrowed and all value is idle
         assertEq(strategy.balanceOfDebt(), 0, "!debt");

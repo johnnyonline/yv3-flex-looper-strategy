@@ -4,6 +4,7 @@ pragma solidity 0.8.23;
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 import {ITroveManager} from "./interfaces/ITroveManager.sol";
 import {IPriceOracle} from "./interfaces/IPriceOracle.sol";
@@ -190,7 +191,7 @@ contract Strategy is BaseLooper {
         require(_isFlashloanActive, "!active");
 
         // Emergency close passes empty data, lever/delever pass an encoded FlashLoanData struct
-        _data.length == 0 ? _handleClose() : _onFlashloanReceived(_assets, _data);
+        _data.length == 0 ? _handleClose(_assets) : _onFlashloanReceived(_assets, _data);
     }
 
     /// @inheritdoc BaseLooper
@@ -334,13 +335,24 @@ contract Strategy is BaseLooper {
     // Emergency
     // ===============================================================
 
-    /// @notice Handles the close in an emergency, with or without a preceding flashloan
-    function _handleClose() internal {
+    /// @notice Closes the Trove, converting only enough collateral to repay the close flashloan
+    /// @dev The freed equity is left as loose collateral so a large or illiquid balance can't revert
+    ///      the close. Management can convert it after via `convertCollateralToAsset()`
+    /// @param _flashloanRepay The asset owed to the flashloan
+    function _handleClose(
+        uint256 _flashloanRepay
+    ) internal {
         uint256 _troveId = troveId;
         uint256 _status = TROVE_MANAGER.troves(_troveId).status;
         if (_status == _STATUS_ACTIVE) TROVE_MANAGER.close_trove(_troveId);
         else if (_status == _STATUS_ZOMBIE) TROVE_MANAGER.close_zombie_trove(_troveId);
-        _convertCollateralToAsset(balanceOfCollateralToken());
+
+        if (_flashloanRepay == 0) return;
+
+        // Convert collateral worth the flashloan (+ slippage), capped at what we hold
+        _convertCollateralToAsset(
+            Math.min(_assetToCollateral(_flashloanRepay) * MAX_BPS / (MAX_BPS - slippage), balanceOfCollateralToken())
+        );
     }
 
     /// @inheritdoc BaseLooper
@@ -348,13 +360,12 @@ contract Strategy is BaseLooper {
         uint256 /*_amount*/
     ) internal override {
         uint256 _status = TROVE_MANAGER.troves(troveId).status;
-        // A closeable Trove (ACTIVE or ZOMBIE) with debt must repay it on close, so
-        // flashloan the debt and finish in `_handleClose()`. Anything else (zombie with
-        // no debt or already liquidated/closed) just needs loose collateral swapped,
-        // done directly via `_handleClose()`
-        (_status == _STATUS_ACTIVE || _status == _STATUS_ZOMBIE) && balanceOfDebt() > 0
-            ? _executeFlashloan(address(asset), balanceOfDebt(), "")
-            : _handleClose();
+        // A closeable Trove (ACTIVE or ZOMBIE) with debt must repay it on close, so flashloan the debt and
+        // finish in `_handleClose()`. Anything else (zombie with no debt or liquidated/closed) just closes
+        uint256 _debt = balanceOfDebt();
+        (_status == _STATUS_ACTIVE || _status == _STATUS_ZOMBIE) && _debt > 0
+            ? _executeFlashloan(address(asset), _debt, "")
+            : _handleClose(0);
     }
 
     // ===============================================================
