@@ -288,11 +288,12 @@ contract Strategy is BaseLooper {
 
     /// @inheritdoc BaseLooper
     function _maxBorrowAmount() internal view override returns (uint256) {
-        uint256 _troveId = troveId;
         uint256 _idle = asset.balanceOf(LENDER);
 
         // If redemption is disabled, we can only borrow up to the idle liquidity
         if (!ALLOW_REDEMPTION) return _idle;
+
+        uint256 _troveId = troveId;
 
         // Debt of all Troves paying a lower rate than ours (i.e. what we can redeem)
         uint256 _redeemable = DEBT_IN_FRONT_HELPER.get_debt_in_front(
