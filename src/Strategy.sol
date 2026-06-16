@@ -46,7 +46,8 @@ contract Strategy is BaseLooper {
     uint256 public immutable MCR;
 
     /// @notice Dust added to a redemption borrow to absorb the redeemed-collateral round-trip rounding
-    uint256 internal constant _REDEMPTION_DUST = 1e4;
+    /// @dev Flex floors collateral once per Trove and redeems up to 1000 Troves, so max loss is < ~1000 wei
+    uint256 internal constant _REDEMPTION_DUST = 1_000;
 
     /// @notice Trove status values
     uint256 internal constant _STATUS_ACTIVE = 1;
