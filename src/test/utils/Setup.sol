@@ -12,8 +12,6 @@ import {IStrategyInterface} from "../../interfaces/IStrategyInterface.sol";
 import {ITroveManager} from "../../interfaces/ITroveManager.sol";
 import {IDebtInFrontHelper} from "../../interfaces/IDebtInFrontHelper.sol";
 
-import {yvUSDToUSDCExchange} from "../../periphery/yvUSDToUSDCExchange.sol";
-
 // Inherit the events so they can be checked if desired.
 import {IEvents} from "@tokenized-strategy/interfaces/IEvents.sol";
 
@@ -70,6 +68,8 @@ contract Setup is Test, IEvents {
     // Flex market (deployed yvUSD/USDC)
     address public yvusd = address(0x696d02Db93291651ED510704c9b286841d506987);
     address public troveManager = address(0xd82DB9893751E9C90E2a6C3bE31183048E8E2e49);
+    // Deployed ERC4626Exchange (USDC <--> yvUSD via vault deposit/redeem)
+    address public erc4626Exchange = address(0x13100bB6AB4e349A36EAa6bD4ab0536Bf72b3054);
     address public exchange;
     address public lender;
 
@@ -136,9 +136,9 @@ contract Setup is Test, IEvents {
         vm.label(performanceFeeRecipient, "performanceFeeRecipient");
     }
 
-    /// @dev Override to swap the real exchange for the configurable mock
+    /// @dev Override to swap the deployed exchange for the configurable mock
     function _deployExchange() internal virtual returns (address) {
-        return address(new yvUSDToUSDCExchange());
+        return erc4626Exchange;
     }
 
     function setUpStrategy() public returns (address) {
