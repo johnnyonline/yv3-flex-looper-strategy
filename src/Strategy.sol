@@ -15,7 +15,7 @@ import {IDebtInFrontHelper} from "./interfaces/IDebtInFrontHelper.sol";
 
 import {BaseLooper} from "./BaseLooper.sol";
 
-contract Strategy is BaseLooper {
+contract FlexLooperStrategy is BaseLooper {
 
     using SafeERC20 for ERC20;
 

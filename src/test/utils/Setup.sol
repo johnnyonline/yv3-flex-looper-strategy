@@ -6,7 +6,7 @@ import {Test} from "forge-std/Test.sol";
 
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
-import {Strategy, ERC20} from "../../Strategy.sol";
+import {FlexLooperStrategy as Strategy, ERC20} from "../../Strategy.sol";
 import {StrategyFactory} from "../../StrategyFactory.sol";
 import {IStrategyInterface} from "../../interfaces/IStrategyInterface.sol";
 import {ITroveManager} from "../../interfaces/ITroveManager.sol";
