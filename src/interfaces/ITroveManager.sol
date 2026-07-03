@@ -22,6 +22,7 @@ interface ITroveManager {
     function price_oracle() external view returns (IPriceOracle);
     function lender() external view returns (address);
     function dutch_desk() external view returns (IDutchDesk);
+    function sorted_troves() external view returns (address);
     function min_debt() external view returns (uint256);
     function minimum_collateral_ratio() external view returns (uint256);
     function min_annual_interest_rate() external view returns (uint256);
@@ -31,6 +32,11 @@ interface ITroveManager {
     ) external view returns (Trove memory);
     function get_trove_debt_after_interest(
         uint256 troveId
+    ) external view returns (uint256);
+    function get_upfront_fee(
+        uint256 debtAmount,
+        uint256 annualInterestRate,
+        bool isExistingDebt
     ) external view returns (uint256);
 
     function open_trove(
