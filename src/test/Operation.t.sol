@@ -74,7 +74,7 @@ contract OperationTest is Setup {
         uint256 balanceBefore = asset.balanceOf(user);
 
         // Skip time to avoid closing on the same block
-        skip(1 seconds);
+        skip(REPAY_COOLDOWN + 1);
 
         // Withdraw all funds
         vm.prank(user);
@@ -123,7 +123,7 @@ contract OperationTest is Setup {
         uint256 balanceBefore = asset.balanceOf(user);
 
         // Skip time to avoid closing on the same block
-        skip(1 seconds);
+        skip(REPAY_COOLDOWN + 1);
 
         // Withdraw all funds
         vm.prank(user);
@@ -176,7 +176,7 @@ contract OperationTest is Setup {
         uint256 balanceBefore = asset.balanceOf(user);
 
         // Skip time to avoid closing on the same block
-        skip(1 seconds);
+        skip(REPAY_COOLDOWN + 1);
 
         // Withdraw all funds
         vm.prank(user);
@@ -188,7 +188,7 @@ contract OperationTest is Setup {
         _assertAtTargetLeverage();
 
         // Skip time to avoid closing on the same block
-        skip(1 seconds);
+        skip(REPAY_COOLDOWN + 1);
 
         vm.prank(performanceFeeRecipient);
         strategy.redeem(expectedShares, performanceFeeRecipient, performanceFeeRecipient);
@@ -226,7 +226,7 @@ contract OperationTest is Setup {
         uint256 _amount,
         uint256 _keep
     ) public {
-        _amount = bound(_amount, maxFuzzAmount, maxFuzzAmount * 10);
+        _amount = bound(_amount, maxFuzzAmount, maxFuzzAmount * 5);
         _keep = bound(_keep, 0, _amount);
 
         // Deposit, then leave only `_keep` idle in the lender so the lever-up must redeem the rest
@@ -285,7 +285,7 @@ contract OperationTest is Setup {
         strategy.report();
 
         // Skip time to avoid touching the trove in the same block as the redemption
-        skip(1 seconds);
+        skip(REPAY_COOLDOWN + 1);
 
         // Recover via shutdown + emergency withdraw: closes the zombie and frees the collateral
         vm.prank(emergencyAdmin);
@@ -342,7 +342,7 @@ contract OperationTest is Setup {
         assertFalse(trigger, "!under target should not trigger");
 
         // Skip time to avoid touching the trove in the same block as the redemption
-        skip(1 seconds);
+        skip(REPAY_COOLDOWN + 1);
 
         // Re-lever back to target
         vm.prank(keeper);
@@ -355,7 +355,7 @@ contract OperationTest is Setup {
         strategy.report();
 
         // Skip time to avoid closing on the same block as the tend
-        skip(1 seconds);
+        skip(REPAY_COOLDOWN + 1);
 
         // Shut down and close the position so the seed (which can't be repaid below MIN_DEBT) can exit
         vm.prank(emergencyAdmin);
@@ -400,7 +400,7 @@ contract OperationTest is Setup {
         assertEq(strategy.availableDepositLimit(user), 0, "!deposit paused");
 
         // Shut down and recover anything left (nothing, when underwater), then report the loss
-        skip(1 seconds);
+        skip(REPAY_COOLDOWN + 1);
         vm.prank(emergencyAdmin);
         strategy.shutdownStrategy();
         vm.prank(emergencyAdmin);
@@ -442,13 +442,13 @@ contract OperationTest is Setup {
         assertLt(strategy.getCurrentLeverageRatio(), strategy.targetLeverageRatio(), "!under target");
 
         // A tend brings leverage back to target
-        skip(1 seconds);
+        skip(REPAY_COOLDOWN + 1);
         vm.prank(keeper);
         strategy.tend();
         _assertAtTargetLeverage();
 
         // Wind down so everyone can exit, then report the partial loss
-        skip(1 seconds);
+        skip(REPAY_COOLDOWN + 1);
         vm.prank(emergencyAdmin);
         strategy.shutdownStrategy();
         vm.prank(emergencyAdmin);

@@ -5,12 +5,15 @@ import "forge-std/console2.sol";
 import {Test} from "forge-std/Test.sol";
 
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {IERC4626} from "@openzeppelin/contracts/interfaces/IERC4626.sol";
 
 import {FlexLooperStrategy as Strategy, ERC20} from "../../Strategy.sol";
 import {StrategyFactory} from "../../StrategyFactory.sol";
 import {IStrategyInterface} from "../../interfaces/IStrategyInterface.sol";
 import {ITroveManager} from "../../interfaces/ITroveManager.sol";
 import {IDebtInFrontHelper} from "../../interfaces/IDebtInFrontHelper.sol";
+
+import {ICatFactory} from "../interfaces/ICatFactory.sol";
 
 // Inherit the events so they can be checked if desired.
 import {IEvents} from "@tokenized-strategy/interfaces/IEvents.sol";
@@ -30,6 +33,12 @@ interface IFactory {
 }
 
 interface ILender {
+
+    function acceptManagement() external;
+
+    function setDepositLimit(
+        uint256 _depositLimit
+    ) external;
 
     function deposit(
         uint256 assets,
@@ -65,11 +74,15 @@ contract Setup is Test, IEvents {
 
     mapping(string => address) public tokenAddrs;
 
-    // Flex market (deployed yvUSD/USDC)
+    // Flex v2 market, deployed in `setUp` from the flex-contracts submodule build artifacts
     address public yvusd = address(0x696d02Db93291651ED510704c9b286841d506987);
-    address public troveManager = address(0xd82DB9893751E9C90E2a6C3bE31183048E8E2e49);
+    // Deployed yvUSD/USDC price oracle (vault PPS in 1e36)
+    address public priceOracle = address(0x6D8D09F18afD74E6D6D0190CCdF89de8FEa54206);
+    // The v1 helper misdecodes v2 Troves, so the v2 build is etched over the hardcoded address
+    address public debtInFrontHelper = address(0xA4119B541a2ebf411F3ED6201107fc1DA016EbD6);
     // Deployed ERC4626Exchange (USDC <--> yvUSD via vault deposit/redeem)
     address public erc4626Exchange = address(0x13100bB6AB4e349A36EAa6bD4ab0536Bf72b3054);
+    address public troveManager;
     address public exchange;
     address public lender;
 
@@ -77,10 +90,12 @@ contract Setup is Test, IEvents {
     address public user = address(10);
     address public seeder = address(777);
     address public lenderUser = address(420);
+    address public troveOpener = address(888);
     address public keeper = address(4);
     address public management = address(1);
     address public performanceFeeRecipient = address(3);
     address public emergencyAdmin = address(5);
+    address public daddy = address(0xDAD);
 
     // Address of the real deployed Factory
     address public factory;
@@ -99,6 +114,13 @@ contract Setup is Test, IEvents {
     // Borrow liquidity to seed into the lender so troves can draw idle on borrow.
     uint256 public constant LENDER_LIQUIDITY_SEED = 10_000_000e6;
 
+    // Debt of the lower-rate Troves opened in `setUp`, redeemable by the strategy's borrows
+    uint256 public constant REDEEMABLE_DEBT_SEED = 800_000e6;
+
+    // Market deploy parameters
+    uint256 public constant MINIMUM_DEBT = 500e6;
+    uint256 public constant REPAY_COOLDOWN = 30 minutes;
+
     function setUp() public virtual {
         vm.createSelectFork(vm.envString("ETH_RPC_URL"), 25_261_306);
 
@@ -109,6 +131,8 @@ contract Setup is Test, IEvents {
         collateral = ERC20(yvusd);
         decimals = asset.decimals();
 
+        // Deploy a fresh v2 Flex market and point the strategy's periphery at it
+        troveManager = _deployFlexMarket();
         lender = ITroveManager(troveManager).lender();
 
         strategyFactory = new StrategyFactory(management, performanceFeeRecipient, keeper, emergencyAdmin);
@@ -117,6 +141,9 @@ contract Setup is Test, IEvents {
 
         // Seed borrow liquidity so the market can serve borrows during levering.
         _seedLenderLiquidity(LENDER_LIQUIDITY_SEED);
+
+        // Open lower-rate Troves so borrows beyond the idle liquidity have debt to redeem
+        _openRedeemableTroves(REDEEMABLE_DEBT_SEED);
 
         // Deploy strategy and set variables
         strategy = IStrategyInterface(setUpStrategy());
@@ -134,6 +161,57 @@ contract Setup is Test, IEvents {
         vm.label(troveManager, "troveManager");
         vm.label(address(strategy), "strategy");
         vm.label(performanceFeeRecipient, "performanceFeeRecipient");
+    }
+
+    /// @dev Deploy a fresh v2 Flex market from the flex-contracts submodule build artifacts
+    function _deployFlexMarket() internal returns (address _troveManager) {
+        // Deploy the implementation contracts
+        address _troveManagerImpl = deployCode("lib/flex-contracts/out/trove_manager.vy/trove_manager.json");
+        address _sortedTroves = deployCode("lib/flex-contracts/out/sorted_troves.vy/sorted_troves.json");
+        address _dutchDesk = deployCode("lib/flex-contracts/out/dutch_desk.vy/dutch_desk.json");
+        address _auction = deployCode("lib/flex-contracts/out/auction.vy/auction.json");
+        address _lenderFactory = deployCode("lib/flex-contracts/out/LenderFactory.sol/LenderFactory.json", abi.encode(daddy));
+        ICatFactory _catFactory = ICatFactory(
+            deployCode(
+                "lib/flex-contracts/out/factory.vy/factory.json",
+                abi.encode(_troveManagerImpl, _sortedTroves, _dutchDesk, _auction, _lenderFactory)
+            )
+        );
+
+        // Deploy the market
+        address _lender;
+        (_troveManager,,,, _lender) = _catFactory.deploy(
+            ICatFactory.DeployParams({
+                borrow_token: address(asset),
+                collateral_token: yvusd,
+                price_oracle: priceOracle,
+                minimum_debt: MINIMUM_DEBT,
+                safe_collateral_ratio: 120, // 120%
+                minimum_collateral_ratio: 110, // 110%
+                max_penalty_collateral_ratio: 105, // 105%
+                min_liquidation_fee: 50, // 0.5%
+                max_liquidation_fee: 500, // 5%
+                upfront_interest_period: 7 days,
+                interest_rate_adj_cooldown: 7 days,
+                repay_cooldown: REPAY_COOLDOWN,
+                minimum_price_buffer_percentage: 1e18 - 1e16, // 99%
+                starting_price_buffer_percentage: 1e18, // 100%
+                re_kick_starting_price_buffer_percentage: 1e18 + 1e15, // 100.1%
+                step_duration: 60, // 1 minute
+                step_decay_rate: 1, // 0.01%
+                auction_length: 1 days,
+                salt: bytes32(uint256(420))
+            })
+        );
+
+        // Accept Lender management and lift its deposit limit
+        vm.startPrank(daddy);
+        ILender(_lender).acceptManagement();
+        ILender(_lender).setDepositLimit(type(uint256).max);
+        vm.stopPrank();
+
+        // The strategy's hardcoded helper misdecodes v2 Troves, etch the v2 build over it
+        vm.etch(debtInFrontHelper, deployCode("lib/flex-contracts/out/debt_in_front_helper.vy/debt_in_front_helper.json").code);
     }
 
     /// @dev Override to swap the deployed exchange for the configurable mock
@@ -191,13 +269,32 @@ contract Setup is Test, IEvents {
         _strategy.openTrove(_rate, 0, 0, type(uint256).max);
     }
 
+    /// @dev Open two Troves at rates below the strategy's, holding `_debt` in total,
+    ///      so the strategy's borrows beyond the Lender's idle have debt in front to redeem
+    function _openRedeemableTroves(
+        uint256 _debt
+    ) internal {
+        // Get real yvUSD by depositing twice the debt (200% CR)
+        airdrop(asset, troveOpener, _debt * 2);
+        vm.startPrank(troveOpener);
+        asset.forceApprove(yvusd, _debt * 2);
+        uint256 _shares = IERC4626(yvusd).deposit(_debt * 2, troveOpener);
+
+        uint256 _minRate = ITroveManager(troveManager).min_annual_interest_rate();
+        ERC20(yvusd).forceApprove(troveManager, _shares);
+        ITroveManager(troveManager).open_trove(
+            1, _shares / 2, _debt / 2, 0, 0, _minRate, type(uint256).max, _debt / 2, 0, troveOpener
+        );
+        ITroveManager(troveManager).open_trove(
+            2, _shares - _shares / 2, _debt / 2, 0, 0, _minRate * 10, type(uint256).max, _debt / 2, 0, troveOpener
+        );
+        vm.stopPrank();
+    }
+
     /// @dev Make the lender hold enough borrow token to serve the strategy's borrows.
     function _seedLenderLiquidity(
         uint256 _amount
     ) internal {
-        // Ignore the lender's deposit limit so fork tests don't depend on live headroom.
-        vm.mockCall(lender, abi.encodeWithSignature("availableDepositLimit(address)"), abi.encode(type(uint256).max));
-
         airdrop(asset, lenderUser, _amount);
         vm.startPrank(lenderUser);
         asset.forceApprove(lender, _amount);

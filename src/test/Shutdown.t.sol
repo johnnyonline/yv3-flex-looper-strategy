@@ -35,7 +35,7 @@ contract ShutdownTest is Setup {
         _assertAtTargetLeverage();
 
         // Skip time to avoid delevering on the same block as the last trove touch
-        skip(1 seconds);
+        skip(REPAY_COOLDOWN + 1);
 
         // The user can still withdraw their full position; the strategy delevers to free it
         vm.startPrank(user);
@@ -67,7 +67,7 @@ contract ShutdownTest is Setup {
         strategy.report();
 
         // Skip time to avoid closing on the same block as the last trove touch
-        skip(1 seconds);
+        skip(REPAY_COOLDOWN + 1);
 
         // Shut down and emergency-close the Trove; the partial-conversion close leaves equity loose
         vm.prank(emergencyAdmin);

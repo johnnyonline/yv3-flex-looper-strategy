@@ -52,7 +52,7 @@ abstract contract BaseShutdownTest is Setup {
 
         // Advance the block so the withdraw's internal repay isn't gated by Flex's
         // same-block debt guard (tend above touched the trove this block).
-        skip(1 seconds);
+        skip(REPAY_COOLDOWN + 1);
 
         // Withdraw all funds
         vm.prank(user);
@@ -90,7 +90,7 @@ abstract contract BaseShutdownTest is Setup {
 
         // Advance the block so emergencyWithdraw's delever isn't gated by Flex's
         // same-block debt guard (tend above touched the trove this block).
-        skip(1 seconds);
+        skip(REPAY_COOLDOWN + 1);
 
         // should be able to pass uint 256 max and not revert.
         vm.prank(emergencyAdmin);
@@ -111,7 +111,7 @@ abstract contract BaseShutdownTest is Setup {
 
         // Advance the block so the withdraw's internal repay isn't gated by Flex's
         // same-block debt guard (emergencyWithdraw above touched the trove).
-        skip(1 seconds);
+        skip(REPAY_COOLDOWN + 1);
 
         // Withdraw all funds
         vm.prank(user);
@@ -168,7 +168,7 @@ abstract contract BaseShutdownTest is Setup {
 
         // Advance the block so manualFullUnwind isn't gated by Flex's same-block
         // debt guard (tend above touched the trove this block).
-        skip(1 seconds);
+        skip(REPAY_COOLDOWN + 1);
 
         // Unwind position using manualFullUnwind (tend alone doesn't fully unwind).
         // manualFullUnwind is an emergency full close that wipes the whole trove
@@ -205,7 +205,7 @@ abstract contract BaseShutdownTest is Setup {
 
         // Advance the block so manualFullUnwind isn't gated by Flex's same-block
         // debt guard (tend above touched the trove this block).
-        skip(1 seconds);
+        skip(REPAY_COOLDOWN + 1);
 
         vm.prank(management);
         strategy.manualFullUnwind();
@@ -270,7 +270,7 @@ abstract contract BaseShutdownTest is Setup {
 
         // Advance the block so manualFullUnwind isn't gated by Flex's same-block
         // debt guard (tend above touched the trove this block).
-        skip(1 seconds);
+        skip(REPAY_COOLDOWN + 1);
 
         vm.prank(management);
         strategy.manualFullUnwind();
@@ -419,7 +419,7 @@ abstract contract BaseShutdownTest is Setup {
 
         // Advance the block so manualFullUnwind isn't gated by Flex's same-block
         // debt guard (tend above touched the trove this block).
-        skip(1 seconds);
+        skip(REPAY_COOLDOWN + 1);
 
         vm.prank(management);
         strategy.manualFullUnwind();
@@ -454,7 +454,7 @@ abstract contract BaseShutdownTest is Setup {
 
         // Advance the block so manualDelever isn't gated by Flex's same-block debt
         // guard (tend above touched the trove this block).
-        skip(1 seconds);
+        skip(REPAY_COOLDOWN + 1);
 
         vm.prank(management);
         strategy.manualDelever(amountToDelever);
@@ -480,7 +480,7 @@ abstract contract BaseShutdownTest is Setup {
 
         // Advance the block so manualDelever isn't gated by Flex's same-block debt
         // guard (tend above touched the trove this block).
-        skip(1 seconds);
+        skip(REPAY_COOLDOWN + 1);
 
         vm.prank(management);
         strategy.manualDelever(type(uint256).max);
@@ -550,7 +550,7 @@ abstract contract BaseShutdownTest is Setup {
 
         // Advance the block so manualFullUnwind isn't gated by Flex's same-block
         // debt guard (tend above touched the trove this block).
-        skip(1 seconds);
+        skip(REPAY_COOLDOWN + 1);
 
         vm.prank(management);
         strategy.manualFullUnwind();
@@ -568,7 +568,7 @@ abstract contract BaseShutdownTest is Setup {
 
         // Advance the block so the rebuild tend isn't gated by Flex's same-block
         // debt guard (manualFullUnwind above touched the trove this block).
-        skip(1 seconds);
+        skip(REPAY_COOLDOWN + 1);
 
         // Rebuild position via tend
         vm.prank(keeper);

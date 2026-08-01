@@ -16,5 +16,11 @@
   },
   "lib/tokenized-strategy-periphery": {
     "rev": "3624e0421d1765997a6e6751a4bd086ab69cfe02"
+  },
+  "lib/flex-contracts": {
+    "branch": {
+      "name": "v2",
+      "rev": "92dfb87b9a5aeec994a78a339b76d70ca811cd30"
+    }
   }
 }

@@ -61,7 +61,7 @@ contract NoRedemptionTest is Setup {
         uint256 balanceBefore = asset.balanceOf(user);
 
         // Skip time to avoid closing on the same block
-        skip(1 seconds);
+        skip(REPAY_COOLDOWN + 1);
 
         // Withdraw all funds
         vm.prank(user);
@@ -105,7 +105,7 @@ contract NoRedemptionTest is Setup {
         uint256 balanceBefore = asset.balanceOf(user);
 
         // Skip time to avoid repaying on the same block
-        skip(1 seconds);
+        skip(REPAY_COOLDOWN + 1);
 
         // Withdraw all funds
         vm.startPrank(user);
