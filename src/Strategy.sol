@@ -256,11 +256,7 @@ contract FlexLooperStrategy is BaseLooper {
 
     /// @inheritdoc BaseLooper
     function _tendTrigger() internal view override returns (bool) {
-        // Every trigger delevers, and a delever repays, which Flex blocks during the repay
-        // cooldown, so don't signal a tend that is guaranteed to revert
         if (block.timestamp <= TROVE_MANAGER.troves(troveId).lastDebtIncreaseTime + REPAY_COOLDOWN) return false;
-
-        // Otherwise use the default trigger logic
         return super._tendTrigger();
     }
 
