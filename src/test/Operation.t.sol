@@ -513,8 +513,13 @@ contract OperationTest is Setup {
         strategy.setLeverageParams(2e18, 0.25e18, 2.5e18);
         assertGt(strategy.getCurrentLeverageRatio(), strategy.maxLeverageRatio(), "!over max");
 
-        // Over max triggers a tend even within the min tend interval
+        // The delevering tend would revert until the repay cooldown elapses, so no trigger
         (bool trigger,) = strategy.tendTrigger();
+        assertFalse(trigger, "!no trigger during cooldown");
+
+        // Once the cooldown elapses, over max triggers a tend even within the min tend interval
+        skip(REPAY_COOLDOWN + 1);
+        (trigger,) = strategy.tendTrigger();
         assertTrue(trigger, "!over max triggers tend");
     }
 
@@ -531,8 +536,13 @@ contract OperationTest is Setup {
         _setCollateralPrice(_price * 70 / 100);
         assertGt(strategy.getCurrentLTV(), strategy.getLiquidateCollateralFactor(), "!liquidatable");
 
-        // Liquidatable triggers a tend even within the min tend interval
+        // The delevering tend would revert until the repay cooldown elapses, so no trigger
         (bool trigger,) = strategy.tendTrigger();
+        assertFalse(trigger, "!no trigger during cooldown");
+
+        // Once the cooldown elapses, liquidatable triggers a tend even within the min tend interval
+        skip(REPAY_COOLDOWN + 1);
+        (trigger,) = strategy.tendTrigger();
         assertTrue(trigger, "!liquidatable triggers tend");
     }
 
