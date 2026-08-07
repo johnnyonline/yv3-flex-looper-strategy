@@ -19,8 +19,8 @@
   },
   "lib/flex-contracts": {
     "branch": {
-      "name": "v2",
-      "rev": "92dfb87b9a5aeec994a78a339b76d70ca811cd30"
+      "name": "master",
+      "rev": "6c3a6e106668946efec061587d2ac85efc05d1eb"
     }
   }
 }

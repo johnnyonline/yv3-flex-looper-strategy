@@ -15,4 +15,4 @@
 [submodule "lib/flex-contracts"]
 	path = lib/flex-contracts
 	url = https://github.com/johnnyonline/flex-contracts
-	branch = v2
+	branch = master
