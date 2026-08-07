@@ -12,6 +12,7 @@ interface ITroveManager {
         uint256 collateral;
         uint256 annualInterestRate;
         uint64 lastDebtUpdateTime;
+        uint64 lastDebtIncreaseTime;
         uint64 lastInterestRateAdjTime;
         address owner;
         uint256 status;
@@ -26,6 +27,7 @@ interface ITroveManager {
     function min_debt() external view returns (uint256);
     function minimum_collateral_ratio() external view returns (uint256);
     function min_annual_interest_rate() external view returns (uint256);
+    function repay_cooldown() external view returns (uint256);
 
     function troves(
         uint256 troveId

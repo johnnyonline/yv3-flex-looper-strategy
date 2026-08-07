@@ -109,7 +109,7 @@ abstract contract BaseOperationTest is Setup {
         uint256 balanceBefore = asset.balanceOf(user);
 
         // Advance a block so the withdraw's internal repay is not gated by Flex's same-block debt guard.
-        skip(1 seconds);
+        skip(REPAY_COOLDOWN + 1);
 
         // Withdraw all funds
         vm.prank(user);
@@ -151,7 +151,7 @@ abstract contract BaseOperationTest is Setup {
         uint256 debtBefore = strategy.balanceOfDebt();
         uint256 lastTendBefore = strategy.lastTend();
 
-        skip(1);
+        skip(REPAY_COOLDOWN + 1);
 
         vm.prank(management);
         strategy.setDoHealthCheck(false);
@@ -182,7 +182,7 @@ abstract contract BaseOperationTest is Setup {
         assertLe(strategy.getCurrentLTV(), warningLTV, "!should be below warning ltv");
         assertGt(strategy.getCurrentLeverageRatio(), upperBound, "!should be above target band");
 
-        skip(1);
+        skip(REPAY_COOLDOWN + 1);
 
         vm.prank(management);
         strategy.setDoHealthCheck(false);
@@ -205,7 +205,7 @@ abstract contract BaseOperationTest is Setup {
         uint256 lowerBound = strategy.targetLeverageRatio() - strategy.leverageBuffer();
         uint256 lastTendBefore = strategy.lastTend();
 
-        skip(1);
+        skip(REPAY_COOLDOWN + 1);
 
         vm.prank(management);
         strategy.setDoHealthCheck(false);
@@ -346,7 +346,7 @@ abstract contract BaseOperationTest is Setup {
         assertGt(collateralBeforeUnwind, 0, "!collateral should be > 0 before unwind");
 
         // Advance a block so the unwind's debt op is not gated by Flex's same-block debt guard.
-        skip(1 seconds);
+        skip(REPAY_COOLDOWN + 1);
 
         // Full unwind via flashloan
         vm.prank(management);
@@ -373,7 +373,7 @@ abstract contract BaseOperationTest is Setup {
 
         // Advance a block so the first collateral/debt op clears Flex's same-block guard
         // (seed trove's last debt update was during setup).
-        skip(1 seconds);
+        skip(REPAY_COOLDOWN + 1);
 
         // Manual supply collateral
         vm.prank(management);
@@ -383,7 +383,7 @@ abstract contract BaseOperationTest is Setup {
         assertGt(collateral, 0, "!collateral after supply");
 
         // Advance a block before the next debt-touching op (Flex same-block guard).
-        skip(1 seconds);
+        skip(REPAY_COOLDOWN + 1);
 
         // Manual borrow
         uint256 borrowAmount = _amount / 2;
@@ -394,7 +394,7 @@ abstract contract BaseOperationTest is Setup {
         assertGt(debt, 0, "!debt after borrow");
 
         // Advance a block before the repay (Flex same-block guard).
-        skip(1 seconds);
+        skip(REPAY_COOLDOWN + 1);
 
         // Manual repay
         vm.prank(management);
@@ -404,7 +404,7 @@ abstract contract BaseOperationTest is Setup {
         assertLt(debtAfterRepay, debt, "!debt should decrease after repay");
 
         // Advance a block before withdrawing collateral (Flex same-block guard).
-        skip(1 seconds);
+        skip(REPAY_COOLDOWN + 1);
 
         // Manual withdraw collateral
         vm.prank(management);
@@ -606,7 +606,7 @@ abstract contract BaseOperationTest is Setup {
 
         // Advance a block: in the same block as the tend's debt update Flex gates the
         // withdraw limit to idle-only. The next block exposes the full delever-able amount.
-        skip(1 seconds);
+        skip(REPAY_COOLDOWN + 1);
 
         // Get current debt
         uint256 debt = strategy.balanceOfDebt();
@@ -637,7 +637,7 @@ abstract contract BaseOperationTest is Setup {
 
         // Advance a block: in the same block as the tend's debt update Flex gates the
         // withdraw limit to idle-only, which would not match the full formula below.
-        skip(1 seconds);
+        skip(REPAY_COOLDOWN + 1);
 
         uint256 currentDebt = strategy.balanceOfDebt();
         uint256 flashloanAvailable = strategy.maxFlashloan();
@@ -749,7 +749,7 @@ abstract contract BaseOperationTest is Setup {
         assertEq(lastTendAfter, block.timestamp, "!lastTend should update");
 
         // Skip to a new timestamp and tend again.
-        skip(1);
+        skip(REPAY_COOLDOWN + 1);
         airdrop(asset, address(strategy), _amount / 30);
         vm.prank(keeper);
         strategy.tend();

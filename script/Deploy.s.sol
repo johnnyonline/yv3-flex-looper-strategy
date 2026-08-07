@@ -20,6 +20,9 @@ interface IAprOracle {
 // ---- Usage ----
 // forge script script/Deploy.s.sol:Deploy --verify --slow -g 150 --etherscan-api-key $KEY --rpc-url $RPC_URL --broadcast
 
+// NOTE: TROVE_MANAGER points at the v1 market. Before deploying against a v2 market, update it
+// (and EXCHANGE if redeployed), and update `DEBT_IN_FRONT_HELPER` in Strategy.sol to the v2 helper
+
 // verify:
 // --constructor-args $(cast abi-encode "constructor(address,address,string,address,address,bool,address)" 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 0x696d02Db93291651ED510704c9b286841d506987 "yvUSD/USDC Flex Looper" 0xd82DB9893751E9C90E2a6C3bE31183048E8E2e49 0x13100bB6AB4e349A36EAa6bD4ab0536Bf72b3054 true 0xFEB4acf3df3cDEA7399794D0869ef76A6EfAff52)
 

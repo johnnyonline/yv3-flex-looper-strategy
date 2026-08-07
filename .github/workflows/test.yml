@@ -44,6 +44,12 @@ jobs:
       - name: Install Foundry deps
         run: forge install
 
+      - name: Install Vyper
+        run: pip3 install vyper==0.4.3
+
+      - name: Build flex-contracts artifacts
+        run: forge build --root lib/flex-contracts
+
       - name: Show remappings
         run: forge remappings
 

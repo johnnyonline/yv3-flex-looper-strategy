@@ -33,9 +33,6 @@ contract FlexLooperStrategy is BaseLooper {
     /// @notice Morpho callback reentrancy guard
     bool internal _isFlashloanActive;
 
-    /// @notice True while we are taking a redemption auction
-    bool internal _isTakingAuction;
-
     // ===============================================================
     // Constants
     // ===============================================================
@@ -45,6 +42,9 @@ contract FlexLooperStrategy is BaseLooper {
 
     /// @notice The market's minimum collateral ratio
     uint256 public immutable MCR;
+
+    /// @notice The market's cooldown after a debt increase before the Trove can repay or close
+    uint256 public immutable REPAY_COOLDOWN;
 
     /// @notice Dust added to a redemption borrow to absorb the redeemed-collateral round-trip rounding
     /// @dev Flex floors collateral once per Trove and redeems up to 1000 Troves, so max loss is < ~1000 wei
@@ -121,6 +121,7 @@ contract FlexLooperStrategy is BaseLooper {
         // Flex scales `minimum_collateral_ratio` by borrow-token precision, convert it to WAD
         MIN_DEBT = TROVE_MANAGER.min_debt();
         MCR = TROVE_MANAGER.minimum_collateral_ratio() * WAD / 10 ** IERC20Metadata(_asset).decimals();
+        REPAY_COOLDOWN = TROVE_MANAGER.repay_cooldown();
 
         // Max approve Trove Manager to pull collateral (supply) and borrow token (repay/close)
         ERC20(_collateraltoken).forceApprove(_troveManager, type(uint256).max);
@@ -244,10 +245,19 @@ contract FlexLooperStrategy is BaseLooper {
     function availableWithdrawLimit(
         address _owner
     ) public view override returns (uint256) {
-        if (!_isTroveActive() || TROVE_MANAGER.troves(troveId).lastDebtUpdateTime == block.timestamp) {
+        if (
+            !_isTroveActive()
+                || block.timestamp <= TROVE_MANAGER.troves(troveId).lastDebtIncreaseTime + REPAY_COOLDOWN
+        ) {
             return balanceOfAsset();
         }
         return super.availableWithdrawLimit(_owner);
+    }
+
+    /// @inheritdoc BaseLooper
+    function _tendTrigger() internal view override returns (bool) {
+        if (block.timestamp <= TROVE_MANAGER.troves(troveId).lastDebtIncreaseTime + REPAY_COOLDOWN) return false;
+        return super._tendTrigger();
     }
 
     /// @inheritdoc BaseLooper
@@ -438,34 +448,17 @@ contract FlexLooperStrategy is BaseLooper {
     // Redemption auction taking
     // ===============================================================
 
-    /// @notice Callback function for the auction when taking a redemption
-    /// @param _taker The address of the taker
-    /// @param _amountTaken The amount of collateral taken by the auction
-    /// @param _neededAmount The amount of asset needed to pay the auction
-    function takeCallback(
-        uint256, /*auctionId*/
-        address _taker,
-        uint256 _amountTaken,
-        uint256 _neededAmount,
-        bytes calldata /*data*/
-    ) external {
-        require(_isTakingAuction && msg.sender == address(AUCTION), "!auction");
-        require(_taker == address(this), "!taker");
-
-        _convertCollateralToAsset(_amountTaken);
-        asset.forceApprove(address(AUCTION), _neededAmount);
-    }
-
     /// @notice Take the redemption auction if it was kicked by the preceding borrow
+    /// @dev We are both the taker and the auction's receiver, so the take costs nothing and
+    ///      delivers the collateral in kind, which we then swap back to asset
     /// @param _nonceBefore The nonce of the Dutch Desk before the borrow.
     ///        If it differs from the current nonce, the auction was kicked and should be taken
     function _takeAuctionIfKicked(
         uint256 _nonceBefore
     ) internal {
         if (DUTCH_DESK.nonce() == _nonceBefore) return;
-        _isTakingAuction = true;
-        AUCTION.take(_nonceBefore, type(uint256).max, address(this), abi.encode(uint256(420)));
-        _isTakingAuction = false;
+        AUCTION.take(_nonceBefore);
+        _convertCollateralToAsset(balanceOfCollateralToken());
     }
 
 }

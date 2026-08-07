@@ -11,6 +11,7 @@ interface IStrategyInterface is IStrategy, IBaseLooper {
     function ALLOW_REDEMPTION() external view returns (bool);
     function MIN_DEBT() external view returns (uint256);
     function MCR() external view returns (uint256);
+    function REPAY_COOLDOWN() external view returns (uint256);
     function LENDER() external view returns (address);
     function DUTCH_DESK() external view returns (address);
     function AUCTION() external view returns (address);

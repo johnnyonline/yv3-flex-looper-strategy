@@ -62,7 +62,7 @@ abstract contract BaseLeverScenariosTest is Setup {
 
         // Flex same-block debt guard: advance the block so the NEXT
         // trove-touching action by the caller does not revert "same block".
-        skip(1 seconds);
+        skip(REPAY_COOLDOWN + 1);
 
         if (reconfigure) {
             vm.prank(management);
@@ -101,7 +101,7 @@ abstract contract BaseLeverScenariosTest is Setup {
 
         // Flex same-block debt guard: advance the block before the manual repay,
         // which touches the trove after the setup tend above.
-        skip(1 seconds);
+        skip(REPAY_COOLDOWN + 1);
 
         vm.startPrank(management);
         // Repay the debt with the airdropped asset
@@ -110,7 +110,7 @@ abstract contract BaseLeverScenariosTest is Setup {
 
         // Advance again so the caller's next trove-touching tend is in a fresh
         // block relative to this manual repay.
-        skip(1 seconds);
+        skip(REPAY_COOLDOWN + 1);
 
         (collateral, debt) = strategy.position();
     }
@@ -299,7 +299,7 @@ abstract contract BaseLeverScenariosTest is Setup {
         // user deposit, and the min-borrow gate cannot be isolated.
         vm.prank(keeper);
         strategy.tend();
-        skip(1 seconds);
+        skip(REPAY_COOLDOWN + 1);
 
         // Raise the min-borrow gate above the would-be flashloan for a tiny deposit.
         vm.prank(management);
@@ -1134,7 +1134,7 @@ abstract contract BaseLeverScenariosTest is Setup {
         // 4. Tend should delever to new target
         // Flex same-block debt guard: advance the block before the second,
         // debt-touching tend (the first tend updated the trove this block).
-        skip(1 seconds);
+        skip(REPAY_COOLDOWN + 1);
         vm.prank(keeper);
         strategy.tend();
 
