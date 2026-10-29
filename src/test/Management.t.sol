@@ -108,4 +108,60 @@ contract ManagementTest is Setup {
         assertEq(collateral.allowance(address(strategy), _newExchange), type(uint256).max, "!new collateral");
     }
 
+    function test_manualFullUnwind_closesAndReopens(
+        uint256 _amount
+    ) public {
+        _amount = bound(_amount, minFuzzAmount, maxFuzzAmount);
+
+        // Lever up a deposit
+        mintAndDepositIntoStrategy(strategy, user, _amount);
+        vm.prank(keeper);
+        strategy.tend();
+        _assertAtTargetLeverage();
+
+        uint256 _oldTroveId = strategy.troveId();
+        uint256 _totalAssetsBefore = strategy.estimatedTotalAssets();
+
+        // Close the Trove without shutting down
+        skip(REPAY_COOLDOWN + 1);
+        vm.prank(emergencyAdmin);
+        strategy.manualFullUnwind();
+
+        assertEq(strategy.troveId(), 0, "!troveId");
+        assertEq(ITroveManager(troveManager).troves(_oldTroveId).status, 4, "!closed");
+        assertFalse(strategy.isShutdown(), "!shutdown");
+        assertEq(strategy.targetLeverageRatio(), 0, "!target");
+        assertEq(strategy.balanceOfDebt(), 0, "!debt");
+        assertEq(strategy.balanceOfCollateral(), 0, "!collateral");
+        assertApproxEqRel(strategy.estimatedTotalAssets(), _totalAssetsBefore, 0.001e18, "!totalAssets");
+
+        // No deposits until management sets leverage again
+        assertEq(strategy.availableDepositLimit(user), 0, "!deposits");
+
+        // Realize the freed equity, then reopen in a later block (the owner index is the block number)
+        vm.prank(emergencyAdmin);
+        strategy.convertCollateralToAsset(type(uint256).max);
+        vm.roll(block.number + 1);
+
+        uint256 _rate = ITroveManager(troveManager).min_annual_interest_rate() * 100;
+        vm.startPrank(management);
+        strategy.openTrove(_rate, 0, 0, type(uint256).max);
+        strategy.setLeverageParams(3e18, 0.25e18, 4e18);
+        vm.stopPrank();
+
+        assertNotEq(strategy.troveId(), _oldTroveId, "!new trove");
+        assertEq(ITroveManager(troveManager).troves(strategy.troveId()).status, 1, "!active");
+
+        // And lever back up
+        vm.prank(keeper);
+        strategy.tend();
+        _assertAtTargetLeverage();
+    }
+
+    function test_manualFullUnwind_onlyEmergencyAuthorized() public {
+        vm.expectRevert("!emergency authorized");
+        vm.prank(keeper);
+        strategy.manualFullUnwind();
+    }
+
 }

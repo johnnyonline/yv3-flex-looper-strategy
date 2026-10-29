@@ -369,6 +369,11 @@ contract FlexLooperStrategy is BaseLooper {
     function _emergencyWithdraw(
         uint256 /*_amount*/
     ) internal override {
+        _closeTrove();
+    }
+
+    /// @notice Closes an active or zombie Trove, flashloaning its debt if it has any
+    function _closeTrove() internal {
         uint256 _status = TROVE_MANAGER.troves(troveId).status;
         // A closeable Trove (ACTIVE or ZOMBIE) with debt must repay it on close, so flashloan the debt and
         // finish in `_handleClose()`. Anything else (zombie with no debt or liquidated/closed) just closes
@@ -382,7 +387,8 @@ contract FlexLooperStrategy is BaseLooper {
     // Manage Trove
     // ===============================================================
 
-    /// @notice Open the Trove. Must be done by management to initialize the strategy
+    /// @notice Open the Trove. Must be done by management to initialize the strategy,
+    ///         or to reopen one after `manualFullUnwind()`
     /// @dev Swaps idle asset into collateral and opens the Trove at `MIN_DEBT` (plus redemption
     ///      dust if the open has to redeem). If redemption is enabled, takes the kicked auction atomically
     /// @param _annualInterestRate The initial annual interest rate for the Trove
@@ -404,7 +410,7 @@ contract FlexLooperStrategy is BaseLooper {
 
         uint256 _nonceBefore = DUTCH_DESK.nonce();
         troveId = TROVE_MANAGER.open_trove(
-            420, // ownerIndex
+            block.number, // ownerIndex
             _convertAssetToCollateral(balanceOfAsset()), // collateralAmount
             _debt, // debtAmount
             _prevId, // prevId
@@ -416,6 +422,15 @@ contract FlexLooperStrategy is BaseLooper {
             address(this) // owner
         );
         if (ALLOW_REDEMPTION) _takeAuctionIfKicked(_nonceBefore);
+    }
+
+    /// @notice Close the Trove without shutting down, so management can open a fresh one with `openTrove()`
+    /// @dev Flex keeps `MIN_DEBT` on ordinary repayments, so the generic unwind can't reach zero debt.
+    ///      Closes an active or zombie Trove instead, and stops levering until management sets new leverage params
+    function manualFullUnwind() external override onlyEmergencyAuthorized {
+        _setLeverageParams(0, 0, WAD);
+        _closeTrove();
+        troveId = 0;
     }
 
     /// @notice Adjust the Trove's annual interest rate

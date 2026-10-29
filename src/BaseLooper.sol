@@ -962,7 +962,7 @@ abstract contract BaseLooper is BaseHealthCheck {
     //////////////////////////////////////////////////////////////*/
 
     /// @notice Emergency full position close via flashloan
-    function manualFullUnwind() external accrue onlyEmergencyAuthorized {
+    function manualFullUnwind() external virtual accrue onlyEmergencyAuthorized {
         // Set leverage target to 0..
         _setLeverageParams(0, 0, 1e18);
         _withdrawFunds(type(uint256).max);

@@ -311,6 +311,51 @@ contract OperationTest is Setup {
         assertGe(asset.balanceOf(seeder), seederDeposit, "!seeder recovered");
     }
 
+    function test_operation_redemptionToZombie_unwindAndReopen(
+        uint256 _amount
+    ) public {
+        _amount = bound(_amount, minFuzzAmount, maxFuzzAmount / 10);
+
+        // Deposit and lever up to target
+        mintAndDepositIntoStrategy(strategy, user, _amount);
+        vm.prank(keeper);
+        strategy.tend();
+        _assertAtTargetLeverage();
+
+        // Redeem our position below MIN_DEBT, turning the trove into a zombie
+        simulateCollateralRedemption(true);
+        uint256 _zombieTroveId = strategy.troveId();
+        uint256 _totalAssetsBefore = strategy.estimatedTotalAssets();
+
+        // Close the zombie without shutting down
+        skip(REPAY_COOLDOWN + 1);
+        vm.prank(emergencyAdmin);
+        strategy.manualFullUnwind();
+
+        assertEq(strategy.troveId(), 0, "!troveId");
+        assertEq(ITroveManager(troveManager).troves(_zombieTroveId).status, 4, "!closed");
+        assertFalse(strategy.isShutdown(), "!shutdown");
+        assertApproxEqRel(strategy.estimatedTotalAssets(), _totalAssetsBefore, 0.001e18, "!totalAssets");
+
+        // Realize the freed equity, then reopen in a later block (the owner index is the block number)
+        vm.prank(emergencyAdmin);
+        strategy.convertCollateralToAsset(type(uint256).max);
+        vm.roll(block.number + 1);
+
+        uint256 _rate = ITroveManager(troveManager).min_annual_interest_rate() * 100;
+        vm.startPrank(management);
+        strategy.openTrove(_rate, 0, 0, type(uint256).max);
+        strategy.setLeverageParams(3e18, 0.25e18, 4e18);
+        vm.stopPrank();
+
+        assertEq(ITroveManager(troveManager).troves(strategy.troveId()).status, 1, "!active");
+
+        // And lever back up
+        vm.prank(keeper);
+        strategy.tend();
+        _assertAtTargetLeverage();
+    }
+
     function test_operation_redemptionNoZombie(
         uint256 _amount
     ) public {
