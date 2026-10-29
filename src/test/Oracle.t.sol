@@ -46,7 +46,7 @@ contract OracleTest is Setup {
 
         // Drop the Trove rate to the minimum so the loop earns a positive spread
         uint256 _minRate = ITroveManager(troveManager).min_annual_interest_rate();
-        vm.prank(keeper);
+        vm.prank(emergencyAdmin);
         strategy.adjustInterestRate(_minRate, 0, 0, type(uint256).max);
 
         mintAndDepositIntoStrategy(strategy, user, _amount);

@@ -49,16 +49,16 @@ contract ManagementTest is Setup {
 
         // Adjusting within the cooldown charges an upfront fee, so allow the max
         uint256 _newRate = _rateBefore * 2;
-        vm.prank(keeper);
+        vm.prank(emergencyAdmin);
         strategy.adjustInterestRate(_newRate, 0, 0, type(uint256).max);
 
         assertEq(ITroveManager(troveManager).troves(_troveId).annualInterestRate, _newRate, "!rate");
         assertGe(strategy.balanceOfDebt(), _debtBefore, "!debt");
     }
 
-    function test_adjustInterestRate_onlyKeepers() public {
-        vm.expectRevert("!keeper");
-        vm.prank(user);
+    function test_adjustInterestRate_onlyEmergencyAuthorized() public {
+        vm.expectRevert("!emergency authorized");
+        vm.prank(keeper);
         strategy.adjustInterestRate(0, 0, 0, 0);
     }
 

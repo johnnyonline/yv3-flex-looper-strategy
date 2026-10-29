@@ -428,7 +428,7 @@ contract FlexLooperStrategy is BaseLooper {
         uint256 _prevId,
         uint256 _nextId,
         uint256 _maxUpfrontFee
-    ) external onlyKeepers {
+    ) external onlyEmergencyAuthorized {
         TROVE_MANAGER.adjust_interest_rate(troveId, _newAnnualInterestRate, _prevId, _nextId, _maxUpfrontFee);
     }
 
