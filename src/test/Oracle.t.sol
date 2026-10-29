@@ -4,15 +4,15 @@ import "forge-std/console2.sol";
 import {Setup} from "./utils/Setup.sol";
 import {ITroveManager} from "../interfaces/ITroveManager.sol";
 
-import {StrategyAprOracle} from "../periphery/StrategyAprOracle.sol";
+import {InfinifiAprOracle} from "../periphery/InfinifiAprOracle.sol";
 
 contract OracleTest is Setup {
 
-    StrategyAprOracle public oracle;
+    InfinifiAprOracle public oracle;
 
     function setUp() public override {
         super.setUp();
-        oracle = new StrategyAprOracle();
+        oracle = new InfinifiAprOracle();
     }
 
     function checkOracle(

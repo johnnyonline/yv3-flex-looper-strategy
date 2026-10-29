@@ -4,8 +4,6 @@ pragma solidity ^0.8.18;
 import {Setup, ERC20, IStrategyInterface} from "./utils/Setup.sol";
 import {ITroveManager} from "../interfaces/ITroveManager.sol";
 
-import {ExchangeMock} from "./mocks/ExchangeMock.sol";
-
 contract ManagementTest is Setup {
 
     function setUp() public virtual override {
@@ -91,8 +89,8 @@ contract ManagementTest is Setup {
     function test_setExchange() public {
         assertEq(strategy.GOVERNANCE(), management, "!gov");
 
-        address _newExchange =
-            address(new ExchangeMock(address(asset), yvusd, address(ITroveManager(troveManager).price_oracle())));
+        // Conversions go through the InfiniFi Gateway, the exchange is only approved
+        address _newExchange = address(0xBEEF);
 
         vm.expectRevert("!governance");
         vm.prank(user);

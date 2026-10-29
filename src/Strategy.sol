@@ -77,7 +77,7 @@ contract FlexLooperStrategy is BaseLooper {
 
     /// @notice The Flex Debt-In-Front Helper contract
     IDebtInFrontHelper public constant DEBT_IN_FRONT_HELPER =
-        IDebtInFrontHelper(0xA4119B541a2ebf411F3ED6201107fc1DA016EbD6);
+        IDebtInFrontHelper(0x927ABC93A9d7f5C445b1a492a1843a21d26F2368);
 
     /// @notice The flash-loan provider
     IMorpho public constant MORPHO = IMorpho(0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb);
@@ -244,7 +244,7 @@ contract FlexLooperStrategy is BaseLooper {
     /// @inheritdoc BaseLooper
     function availableWithdrawLimit(
         address _owner
-    ) public view override returns (uint256) {
+    ) public view virtual override returns (uint256) {
         if (
             !_isTroveActive()
                 || block.timestamp <= TROVE_MANAGER.troves(troveId).lastDebtIncreaseTime + REPAY_COOLDOWN
@@ -298,7 +298,7 @@ contract FlexLooperStrategy is BaseLooper {
     }
 
     /// @inheritdoc BaseLooper
-    function _maxBorrowAmount() internal view override returns (uint256) {
+    function _maxBorrowAmount() internal view virtual override returns (uint256) {
         uint256 _idle = asset.balanceOf(LENDER);
 
         // If redemption is disabled, we can only borrow up to the idle liquidity
