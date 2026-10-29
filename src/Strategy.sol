@@ -77,7 +77,7 @@ contract FlexLooperStrategy is BaseLooper {
 
     /// @notice The Flex Debt-In-Front Helper contract
     IDebtInFrontHelper public constant DEBT_IN_FRONT_HELPER =
-        IDebtInFrontHelper(0xA4119B541a2ebf411F3ED6201107fc1DA016EbD6);
+        IDebtInFrontHelper(0x927ABC93A9d7f5C445b1a492a1843a21d26F2368);
 
     /// @notice The flash-loan provider
     IMorpho public constant MORPHO = IMorpho(0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb);
@@ -244,7 +244,7 @@ contract FlexLooperStrategy is BaseLooper {
     /// @inheritdoc BaseLooper
     function availableWithdrawLimit(
         address _owner
-    ) public view override returns (uint256) {
+    ) public view virtual override returns (uint256) {
         if (
             !_isTroveActive()
                 || block.timestamp <= TROVE_MANAGER.troves(troveId).lastDebtIncreaseTime + REPAY_COOLDOWN
@@ -298,7 +298,7 @@ contract FlexLooperStrategy is BaseLooper {
     }
 
     /// @inheritdoc BaseLooper
-    function _maxBorrowAmount() internal view override returns (uint256) {
+    function _maxBorrowAmount() internal view virtual override returns (uint256) {
         uint256 _idle = asset.balanceOf(LENDER);
 
         // If redemption is disabled, we can only borrow up to the idle liquidity
@@ -369,6 +369,11 @@ contract FlexLooperStrategy is BaseLooper {
     function _emergencyWithdraw(
         uint256 /*_amount*/
     ) internal override {
+        _closeTrove();
+    }
+
+    /// @notice Closes an active or zombie Trove, flashloaning its debt if it has any
+    function _closeTrove() internal {
         uint256 _status = TROVE_MANAGER.troves(troveId).status;
         // A closeable Trove (ACTIVE or ZOMBIE) with debt must repay it on close, so flashloan the debt and
         // finish in `_handleClose()`. Anything else (zombie with no debt or liquidated/closed) just closes
@@ -382,7 +387,8 @@ contract FlexLooperStrategy is BaseLooper {
     // Manage Trove
     // ===============================================================
 
-    /// @notice Open the Trove. Must be done by management to initialize the strategy
+    /// @notice Open the Trove. Must be done by management to initialize the strategy,
+    ///         or to reopen one after `manualFullUnwind()`
     /// @dev Swaps idle asset into collateral and opens the Trove at `MIN_DEBT` (plus redemption
     ///      dust if the open has to redeem). If redemption is enabled, takes the kicked auction atomically
     /// @param _annualInterestRate The initial annual interest rate for the Trove
@@ -404,7 +410,7 @@ contract FlexLooperStrategy is BaseLooper {
 
         uint256 _nonceBefore = DUTCH_DESK.nonce();
         troveId = TROVE_MANAGER.open_trove(
-            420, // ownerIndex
+            block.number, // ownerIndex
             _convertAssetToCollateral(balanceOfAsset()), // collateralAmount
             _debt, // debtAmount
             _prevId, // prevId
@@ -418,6 +424,15 @@ contract FlexLooperStrategy is BaseLooper {
         if (ALLOW_REDEMPTION) _takeAuctionIfKicked(_nonceBefore);
     }
 
+    /// @notice Close the Trove without shutting down, so management can open a fresh one with `openTrove()`
+    /// @dev Flex keeps `MIN_DEBT` on ordinary repayments, so the generic unwind can't reach zero debt.
+    ///      Closes an active or zombie Trove instead, and stops levering until management sets new leverage params
+    function manualFullUnwind() external override onlyEmergencyAuthorized {
+        _setLeverageParams(0, 0, WAD);
+        _closeTrove();
+        troveId = 0;
+    }
+
     /// @notice Adjust the Trove's annual interest rate
     /// @param _newAnnualInterestRate The new annual interest rate to set
     /// @param _prevId Sorted-troves insertion hint (computed offchain)
@@ -428,7 +443,7 @@ contract FlexLooperStrategy is BaseLooper {
         uint256 _prevId,
         uint256 _nextId,
         uint256 _maxUpfrontFee
-    ) external onlyKeepers {
+    ) external onlyEmergencyAuthorized {
         TROVE_MANAGER.adjust_interest_rate(troveId, _newAnnualInterestRate, _prevId, _nextId, _maxUpfrontFee);
     }
 

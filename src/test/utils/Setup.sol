@@ -5,15 +5,15 @@ import "forge-std/console2.sol";
 import {Test} from "forge-std/Test.sol";
 
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import {IERC4626} from "@openzeppelin/contracts/interfaces/IERC4626.sol";
 
-import {FlexLooperStrategy as Strategy, ERC20} from "../../Strategy.sol";
-import {StrategyFactory} from "../../StrategyFactory.sol";
+import {InfinifiFlexLooperStrategy as Strategy, ERC20} from "../../integrations/InfinifiStrategy.sol";
 import {IStrategyInterface} from "../../interfaces/IStrategyInterface.sol";
 import {ITroveManager} from "../../interfaces/ITroveManager.sol";
 import {IDebtInFrontHelper} from "../../interfaces/IDebtInFrontHelper.sol";
+import {IInfiniFiGatewayV1} from "../../interfaces/IInfiniFiGatewayV1.sol";
 
 import {ICatFactory} from "../interfaces/ICatFactory.sol";
+import {IInfiniFiCore, ILiveRedeemController} from "../interfaces/IInfiniFi.sol";
 
 // Inherit the events so they can be checked if desired.
 import {IEvents} from "@tokenized-strategy/interfaces/IEvents.sol";
@@ -70,20 +70,15 @@ contract Setup is Test, IEvents {
     ERC20 public collateral;
     IStrategyInterface public strategy;
 
-    StrategyFactory public strategyFactory;
-
     mapping(string => address) public tokenAddrs;
 
     // Flex v2 market, deployed in `setUp` from the flex-contracts submodule build artifacts
-    address public yvusd = address(0x696d02Db93291651ED510704c9b286841d506987);
-    // Deployed yvUSD/USDC price oracle (vault PPS in 1e36)
-    address public priceOracle = address(0x6D8D09F18afD74E6D6D0190CCdF89de8FEa54206);
-    // The v1 helper misdecodes v2 Troves, so the v2 build is etched over the hardcoded address
-    address public debtInFrontHelper = address(0xA4119B541a2ebf411F3ED6201107fc1DA016EbD6);
-    // Deployed ERC4626Exchange (USDC <--> yvUSD via vault deposit/redeem)
-    address public erc4626Exchange = address(0x13100bB6AB4e349A36EAa6bD4ab0536Bf72b3054);
+    address public siusd = address(0xDBDC1Ef57537E34680B898E1FEBD3D68c7389bCB);
+    // Deployed siUSD/USDC price oracle (siUSD rate times the approved iUSD price, in 1e36)
+    address public priceOracle = address(0xb11a3D2F05fc9424325ACBcB38eEC59e7745C297);
+    // InfiniFi Gateway (USDC <--> siUSD via mint/stake and unstake/redeem)
+    address public gateway = address(0x3f04b65Ddbd87f9CE0A2e7Eb24d80e7fb87625b5);
     address public troveManager;
-    address public exchange;
     address public lender;
 
     // Addresses for different roles we will use repeatedly.
@@ -122,22 +117,21 @@ contract Setup is Test, IEvents {
     uint256 public constant REPAY_COOLDOWN = 30 minutes;
 
     function setUp() public virtual {
-        vm.createSelectFork(vm.envString("ETH_RPC_URL"), 25_261_306);
+        vm.createSelectFork(vm.envString("ETH_RPC_URL"), 26_298_000);
 
         _setTokenAddrs();
 
         // Set asset / collateral
         asset = ERC20(tokenAddrs["USDC"]);
-        collateral = ERC20(yvusd);
+        collateral = ERC20(siusd);
         decimals = asset.decimals();
+
+        // Serve InfiniFi's instant redemptions from its redeem controller's liquidity
+        _fundInfinifiRedemptions();
 
         // Deploy a fresh v2 Flex market and point the strategy's periphery at it
         troveManager = _deployFlexMarket();
         lender = ITroveManager(troveManager).lender();
-
-        strategyFactory = new StrategyFactory(management, performanceFeeRecipient, keeper, emergencyAdmin);
-
-        exchange = _deployExchange();
 
         // Seed borrow liquidity so the market can serve borrows during levering.
         _seedLenderLiquidity(LENDER_LIQUIDITY_SEED);
@@ -154,8 +148,8 @@ contract Setup is Test, IEvents {
         vm.label(keeper, "keeper");
         vm.label(factory, "factory");
         vm.label(lender, "lender");
-        vm.label(exchange, "exchange");
-        vm.label(yvusd, "collateral");
+        vm.label(gateway, "gateway");
+        vm.label(siusd, "collateral");
         vm.label(address(asset), "asset");
         vm.label(management, "management");
         vm.label(troveManager, "troveManager");
@@ -183,7 +177,7 @@ contract Setup is Test, IEvents {
         (_troveManager,,,, _lender) = _catFactory.deploy(
             ICatFactory.DeployParams({
                 borrow_token: address(asset),
-                collateral_token: yvusd,
+                collateral_token: siusd,
                 price_oracle: priceOracle,
                 minimum_debt: MINIMUM_DEBT,
                 safe_collateral_ratio: 120, // 120%
@@ -209,14 +203,6 @@ contract Setup is Test, IEvents {
         ILender(_lender).acceptManagement();
         ILender(_lender).setDepositLimit(type(uint256).max);
         vm.stopPrank();
-
-        // The strategy's hardcoded helper misdecodes v2 Troves, etch the v2 build over it
-        vm.etch(debtInFrontHelper, deployCode("lib/flex-contracts/out/debt_in_front_helper.vy/debt_in_front_helper.json").code);
-    }
-
-    /// @dev Override to swap the deployed exchange for the configurable mock
-    function _deployExchange() internal virtual returns (address) {
-        return erc4626Exchange;
     }
 
     function setUpStrategy() public returns (address) {
@@ -231,16 +217,20 @@ contract Setup is Test, IEvents {
         // we save the strategy as a IStrategyInterface to give it the needed interface
         _strategy = IStrategyInterface(
             address(
-                strategyFactory.newStrategy(
-                    address(asset), // _asset
-                    yvusd, // _collateralToken
+                new Strategy(
                     "Flex Looper", // _name
                     troveManager, // _troveManager
-                    exchange, // _exchange
-                    _allowRedemption() // _allowRedemption
+                    _allowRedemption(), // _allowRedemption
+                    management // _governance
                 )
             )
         );
+
+        // Set the roles, as the deploy script does
+        _strategy.setPerformanceFeeRecipient(performanceFeeRecipient);
+        _strategy.setKeeper(keeper);
+        _strategy.setPendingManagement(management);
+        _strategy.setEmergencyAdmin(emergencyAdmin);
 
         vm.startPrank(management);
         _strategy.acceptManagement();
@@ -274,14 +264,15 @@ contract Setup is Test, IEvents {
     function _openRedeemableTroves(
         uint256 _debt
     ) internal {
-        // Get real yvUSD by depositing twice the debt (200% CR)
+        // Get real siUSD by minting and staking twice the debt (200% CR)
         airdrop(asset, troveOpener, _debt * 2);
         vm.startPrank(troveOpener);
-        asset.forceApprove(yvusd, _debt * 2);
-        uint256 _shares = IERC4626(yvusd).deposit(_debt * 2, troveOpener);
+        asset.forceApprove(gateway, _debt * 2);
+        IInfiniFiGatewayV1(gateway).mintAndStake(troveOpener, _debt * 2);
+        uint256 _shares = ERC20(siusd).balanceOf(troveOpener);
 
         uint256 _minRate = ITroveManager(troveManager).min_annual_interest_rate();
-        ERC20(yvusd).forceApprove(troveManager, _shares);
+        ERC20(siusd).forceApprove(troveManager, _shares);
         ITroveManager(troveManager).open_trove(
             1, _shares / 2, _debt / 2, 0, 0, _minRate, type(uint256).max, _debt / 2, 0, troveOpener
         );
@@ -289,6 +280,26 @@ contract Setup is Test, IEvents {
             2, _shares - _shares / 2, _debt / 2, 0, 0, _minRate * 10, type(uint256).max, _debt / 2, 0, troveOpener
         );
         vm.stopPrank();
+    }
+
+    /// @dev InfiniFi's hook pulls instant redemptions from its farms, whose 1 ppm slippage guard reverts on some
+    ///      amounts. Serve them from the redeem controller's own liquidity instead, so fuzzed amounts are stable
+    function _fundInfinifiRedemptions() internal {
+        ILiveRedeemController _controller = _redeemController();
+        vm.prank(_infinifiRole(_controller, "GOVERNOR"));
+        _controller.setBeforeRedeemHook(address(0));
+        airdrop(asset, address(_controller), 100_000_000e6);
+    }
+
+    function _redeemController() internal view returns (ILiveRedeemController) {
+        return ILiveRedeemController(IInfiniFiGatewayV1(gateway).getAddress("redeemController"));
+    }
+
+    function _infinifiRole(
+        ILiveRedeemController _controller,
+        string memory _name
+    ) internal view returns (address) {
+        return IInfiniFiCore(_controller.core()).getRoleMember(keccak256(bytes(_name)), 0);
     }
 
     /// @dev Make the lender hold enough borrow token to serve the strategy's borrows.

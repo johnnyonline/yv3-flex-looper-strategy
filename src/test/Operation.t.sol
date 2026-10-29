@@ -17,16 +17,16 @@ contract OperationTest is Setup {
         assertEq(strategy.management(), management, "E2");
         assertEq(strategy.performanceFeeRecipient(), performanceFeeRecipient, "E3");
         assertEq(strategy.keeper(), keeper, "E4");
-        assertEq(strategy.collateralToken(), yvusd, "E5");
+        assertEq(strategy.collateralToken(), siusd, "E5");
         assertEq(strategy.GOVERNANCE(), management, "E6");
-        assertEq(strategy.exchange(), exchange, "E7");
+        assertEq(strategy.exchange(), address(0), "E7");
         assertEq(strategy.depositLimit(), type(uint256).max, "E8");
         assertEq(strategy.targetLeverageRatio(), 3e18, "E9");
         assertEq(strategy.leverageBuffer(), 0.25e18, "E10");
         assertEq(strategy.maxLeverageRatio(), 4e18, "E11");
         assertEq(strategy.minTendInterval(), 2 hours, "E12");
         assertEq(strategy.maxAmountToSwap(), type(uint256).max, "E13");
-        assertEq(strategy.slippage(), 30, "E14");
+        assertEq(strategy.slippage(), 1, "E14");
         assertEq(strategy.minAmountToBorrow(), 100, "E15");
         assertEq(strategy.lossLimitRatio(), 10, "E16");
         assertEq(strategy.profitLimitRatio(), 500, "E17");
@@ -309,6 +309,51 @@ contract OperationTest is Setup {
         strategy.redeem(strategy.balanceOf(seeder), seeder, seeder);
         vm.stopPrank();
         assertGe(asset.balanceOf(seeder), seederDeposit, "!seeder recovered");
+    }
+
+    function test_operation_redemptionToZombie_unwindAndReopen(
+        uint256 _amount
+    ) public {
+        _amount = bound(_amount, minFuzzAmount, maxFuzzAmount / 10);
+
+        // Deposit and lever up to target
+        mintAndDepositIntoStrategy(strategy, user, _amount);
+        vm.prank(keeper);
+        strategy.tend();
+        _assertAtTargetLeverage();
+
+        // Redeem our position below MIN_DEBT, turning the trove into a zombie
+        simulateCollateralRedemption(true);
+        uint256 _zombieTroveId = strategy.troveId();
+        uint256 _totalAssetsBefore = strategy.estimatedTotalAssets();
+
+        // Close the zombie without shutting down
+        skip(REPAY_COOLDOWN + 1);
+        vm.prank(emergencyAdmin);
+        strategy.manualFullUnwind();
+
+        assertEq(strategy.troveId(), 0, "!troveId");
+        assertEq(ITroveManager(troveManager).troves(_zombieTroveId).status, 4, "!closed");
+        assertFalse(strategy.isShutdown(), "!shutdown");
+        assertApproxEqRel(strategy.estimatedTotalAssets(), _totalAssetsBefore, 0.001e18, "!totalAssets");
+
+        // Realize the freed equity, then reopen in a later block (the owner index is the block number)
+        vm.prank(emergencyAdmin);
+        strategy.convertCollateralToAsset(type(uint256).max);
+        vm.roll(block.number + 1);
+
+        uint256 _rate = ITroveManager(troveManager).min_annual_interest_rate() * 100;
+        vm.startPrank(management);
+        strategy.openTrove(_rate, 0, 0, type(uint256).max);
+        strategy.setLeverageParams(3e18, 0.25e18, 4e18);
+        vm.stopPrank();
+
+        assertEq(ITroveManager(troveManager).troves(strategy.troveId()).status, 1, "!active");
+
+        // And lever back up
+        vm.prank(keeper);
+        strategy.tend();
+        _assertAtTargetLeverage();
     }
 
     function test_operation_redemptionNoZombie(
