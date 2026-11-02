@@ -220,7 +220,6 @@ contract Setup is Test, IEvents {
                 new Strategy(
                     "Flex Looper", // _name
                     troveManager, // _troveManager
-                    _allowRedemption(), // _allowRedemption
                     management // _governance
                 )
             )
@@ -239,11 +238,6 @@ contract Setup is Test, IEvents {
         _strategy.setMaxGasPriceToTend(type(uint256).max);
         _strategy.setProfitMaxUnlockTime(0);
         vm.stopPrank();
-    }
-
-    /// @dev Override to deploy the strategy with redemption disabled
-    function _allowRedemption() internal view virtual returns (bool) {
-        return true;
     }
 
     /// @dev Donate a small asset seed to the strategy and open the trove at MIN_DEBT.

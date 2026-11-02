@@ -158,6 +158,40 @@ contract InfinifiTest is Setup {
         assertLe(strategy.balanceOfDebt() - _debtBefore, _keep + _keep / 100, "!debt");
     }
 
+    function test_redeemQueued_emergencyCloseFromIdle(
+        uint256 _amount
+    ) public {
+        _amount = bound(_amount, minFuzzAmount, maxFuzzAmount);
+
+        // Lever up
+        mintAndDepositIntoStrategy(strategy, user, _amount);
+        vm.prank(keeper);
+        strategy.tend();
+        skip(REPAY_COOLDOWN + 1);
+
+        // Leave a deposit idle that covers the debt
+        mintAndDepositIntoStrategy(strategy, user, strategy.balanceOfDebt());
+
+        // Someone else is queued at InfiniFi, so collateral can't be redeemed instantly
+        _enqueueOutsider();
+
+        uint256 _troveId = strategy.troveId();
+        uint256 _debt = strategy.balanceOfDebt();
+        uint256 _idle = strategy.balanceOfAsset();
+        uint256 _collateral = strategy.balanceOfCollateral();
+        uint256 _loose = strategy.balanceOfCollateralToken();
+
+        // The close repays from idle, without redeeming any collateral
+        vm.startPrank(emergencyAdmin);
+        strategy.shutdownStrategy();
+        strategy.emergencyWithdraw(type(uint256).max);
+        vm.stopPrank();
+
+        assertEq(ITroveManager(troveManager).troves(_troveId).status, 4, "!closed");
+        assertEq(strategy.balanceOfAsset(), _idle - _debt, "!idle");
+        assertEq(strategy.balanceOfCollateralToken(), _loose + _collateral, "!collateral");
+    }
+
     function test_iusdDepeg_withdrawReverts(
         uint256 _amount
     ) public {

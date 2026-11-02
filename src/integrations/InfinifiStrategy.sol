@@ -47,14 +47,12 @@ contract InfinifiFlexLooperStrategy is FlexLooperStrategy {
 
     /// @param _name Strategy name
     /// @param _troveManager The Flex Trove Manager contract of a siUSD/USDC market
-    /// @param _allowRedemption Whether borrows may trigger a collateral redemption
     /// @param _governance The address allowed to update exchange configuration
     constructor(
         string memory _name,
         address _troveManager,
-        bool _allowRedemption,
         address _governance
-    ) FlexLooperStrategy(USDC, SIUSD, _name, _troveManager, address(0), _allowRedemption, _governance) {
+    ) FlexLooperStrategy(USDC, SIUSD, _name, _troveManager, address(0), true, _governance) {
         // InfiniFi converts 1:1, slippage only covers rounding
         slippage = 1;
 

@@ -47,7 +47,6 @@ contract DeployInfinifi is Script {
             new InfinifiFlexLooperStrategy(
                 "siUSD/USDC Flex Looper", // name
                 TROVE_MANAGER, // troveManager
-                true, // allowRedemption
                 CHAD // governance
             )
         );

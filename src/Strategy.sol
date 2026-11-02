@@ -372,14 +372,15 @@ contract FlexLooperStrategy is BaseLooper {
         _closeTrove();
     }
 
-    /// @notice Closes an active or zombie Trove, flashloaning its debt if it has any
+    /// @notice Closes an active or zombie Trove, repaying its debt from idle first and flashloaning the rest
     function _closeTrove() internal {
         uint256 _status = TROVE_MANAGER.troves(troveId).status;
-        // A closeable Trove (ACTIVE or ZOMBIE) with debt must repay it on close, so flashloan the debt and
-        // finish in `_handleClose()`. Anything else (zombie with no debt or liquidated/closed) just closes
+        // A closeable Trove (ACTIVE or ZOMBIE) with debt must repay it on close, so flashloan what idle can't cover
+        // and finish in `_handleClose()`. Anything else (debt covered by idle or liquidated/closed) just closes
         uint256 _debt = balanceOfDebt();
-        (_status == _STATUS_ACTIVE || _status == _STATUS_ZOMBIE) && _debt > 0
-            ? _executeFlashloan(address(asset), _debt, "")
+        uint256 _idle = balanceOfAsset();
+        (_status == _STATUS_ACTIVE || _status == _STATUS_ZOMBIE) && _debt > _idle
+            ? _executeFlashloan(address(asset), _debt - _idle, "")
             : _handleClose(0);
     }
 
