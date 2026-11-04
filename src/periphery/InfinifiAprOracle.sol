@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0
 pragma solidity 0.8.23;
 
-import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
-
 import {IStakedToken} from "../interfaces/IStakedToken.sol";
 import {IYieldSharingV2} from "../interfaces/IYieldSharingV2.sol";
 
@@ -29,11 +27,9 @@ contract InfinifiAprOracle is StrategyAprOracle {
     ) internal view override returns (uint256) {
         IYieldSharingV2 _yieldSharing = IYieldSharingV2(IStakedToken(_collateral).yieldSharing());
 
-        // Rewards stream at `rate` per second, capped by what's left to vest. Accruals reset the
-        // elapsed time, so count at least a second to still read the rate in the block of an accrual
-        (uint32 _lastAccrued, uint32 _lastClaimed, uint208 _rate) = _yieldSharing.point();
-        uint256 _elapsed = block.timestamp - Math.max(_lastAccrued, _lastClaimed);
-        uint256 _ratePerSecond = Math.min(_rate, _yieldSharing.vesting() / Math.max(_elapsed, 1));
+        // Rewards stream at `rate` per second until the escrow has fully vested
+        (,, uint208 _rate) = _yieldSharing.point();
+        uint256 _ratePerSecond = _yieldSharing.vesting() > _yieldSharing.vested() ? _rate : 0;
 
         // Our delta in iUSD
         uint256 _absDelta = _collateralDelta < 0 ? uint256(-_collateralDelta) : uint256(_collateralDelta);

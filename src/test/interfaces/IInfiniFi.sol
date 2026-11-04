@@ -29,6 +29,13 @@ interface ILiveRedeemController is IRedeemController {
 
 }
 
+interface ILiveYieldSharing {
+
+    function interpolationDuration() external view returns (uint256);
+    function distributeInterpolationRewards() external;
+
+}
+
 interface IGatewayMint {
 
     function mint(
