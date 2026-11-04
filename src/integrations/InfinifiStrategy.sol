@@ -185,7 +185,7 @@ contract InfinifiFlexLooperStrategy is FlexLooperStrategy {
 
     /// @notice Claim queued redemptions from InfiniFi
     /// @return _assets The amount of USDC claimed
-    function claimCooldown() external onlyKeepers returns (uint256 _assets) {
+    function claimCooldown() external onlyEmergencyAuthorized returns (uint256 _assets) {
         IRedeemController _redeemController_ = _redeemController();
         require(_redeemController_.userPendingClaims(address(this)) > 0, "!claim");
 

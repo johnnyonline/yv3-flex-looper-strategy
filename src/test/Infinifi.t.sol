@@ -108,7 +108,7 @@ contract InfinifiTest is Setup {
         _fundQueue(_controller, _pendingAssets);
         uint256 _idleBefore = strategy.balanceOfAsset();
 
-        vm.prank(keeper);
+        vm.prank(emergencyAdmin);
         uint256 _claimed = looper.claimCooldown();
 
         assertApproxEqAbs(_claimed, _pendingAssets, 1, "!claimed");
@@ -152,7 +152,7 @@ contract InfinifiTest is Setup {
 
         // iUSD is re-priced up before we claim, so the claim settles fewer receipts than InfiniFi burned
         vm.mockCall(_controller.accounting(), abi.encodeWithSignature("price(address)", IUSD), abi.encode(1.1e18));
-        vm.prank(keeper);
+        vm.prank(emergencyAdmin);
         looper.claimCooldown();
 
         // Nothing is queued anymore, but the leftover blocks reports and can't be claimed
@@ -160,7 +160,7 @@ contract InfinifiTest is Setup {
         vm.prank(keeper);
         vm.expectRevert("!cooldown");
         strategy.report();
-        vm.prank(keeper);
+        vm.prank(emergencyAdmin);
         vm.expectRevert("!claim");
         looper.claimCooldown();
 
@@ -267,7 +267,7 @@ contract InfinifiTest is Setup {
         looper.initiateCooldown(1, 0);
 
         vm.prank(user);
-        vm.expectRevert("!keeper");
+        vm.expectRevert("!emergency authorized");
         looper.claimCooldown();
 
         vm.prank(user);
@@ -286,7 +286,7 @@ contract InfinifiTest is Setup {
     }
 
     function test_claimCooldown_revertsWithoutClaim() public {
-        vm.prank(keeper);
+        vm.prank(emergencyAdmin);
         vm.expectRevert("!claim");
         looper.claimCooldown();
     }
