@@ -151,6 +151,12 @@ contract InfinifiFlexLooperStrategy is FlexLooperStrategy {
         ignorePending = _ignorePending;
     }
 
+    /// @notice Zero the queued receipts
+    /// @dev For any left over when iUSD is re-priced up between InfiniFi funding and our claim
+    function zeroQueuedReceipts() external onlyManagement {
+        queuedReceipts = 0;
+    }
+
     /// @notice Unstake loose siUSD and redeem it for USDC, queueing whatever can't be redeemed instantly
     /// @param _shares The amount of siUSD to unwind, capped by the loose balance
     /// @param _minAssetsOut The minimum amount of USDC redeemed instantly

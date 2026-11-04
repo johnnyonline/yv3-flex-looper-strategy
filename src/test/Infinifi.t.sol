@@ -126,6 +126,53 @@ contract InfinifiTest is Setup {
         assertGe(asset.balanceOf(user), _amount, "!user recovered");
     }
 
+    function test_zeroQueuedReceipts_clearsStuckPending(
+        uint256 _amount
+    ) public {
+        _amount = bound(_amount, minFuzzAmount, maxFuzzAmount);
+
+        // Lever up and earn
+        mintAndDepositIntoStrategy(strategy, user, _amount);
+        vm.prank(keeper);
+        strategy.tend();
+        accrueYield(_amount);
+
+        // Shut down and close the Trove, which leaves the equity as loose siUSD
+        skip(REPAY_COOLDOWN + 1);
+        vm.startPrank(emergencyAdmin);
+        strategy.shutdownStrategy();
+        strategy.emergencyWithdraw(type(uint256).max);
+        vm.stopPrank();
+
+        // The cooldown queues it all, then InfiniFi funds it at 1:1
+        ILiveRedeemController _controller = _prepareLiveRedeemController();
+        vm.prank(emergencyAdmin);
+        (, uint256 _pendingAssets) = looper.initiateCooldown(type(uint256).max, 0);
+        _fundQueue(_controller, _pendingAssets);
+
+        // iUSD is re-priced up before we claim, so the claim settles fewer receipts than InfiniFi burned
+        vm.mockCall(_controller.accounting(), abi.encodeWithSignature("price(address)", IUSD), abi.encode(1.1e18));
+        vm.prank(keeper);
+        looper.claimCooldown();
+
+        // Nothing is queued anymore, but the leftover blocks reports and can't be claimed
+        assertGt(looper.pendingRedemptions(), 1_000, "!stuck");
+        vm.prank(keeper);
+        vm.expectRevert("!cooldown");
+        strategy.report();
+        vm.prank(keeper);
+        vm.expectRevert("!claim");
+        looper.claimCooldown();
+
+        // Management clears it and reports go through
+        vm.prank(management);
+        looper.zeroQueuedReceipts();
+        assertEq(looper.queuedReceipts(), 0, "!queued");
+        assertEq(looper.pendingRedemptions(), 0, "!pending");
+        vm.prank(keeper);
+        strategy.report();
+    }
+
     function test_redeemQueued_onlyIdle(
         uint256 _amount,
         uint256 _keep
@@ -226,6 +273,10 @@ contract InfinifiTest is Setup {
         vm.prank(user);
         vm.expectRevert("!management");
         looper.setIgnorePending(true);
+
+        vm.prank(user);
+        vm.expectRevert("!management");
+        looper.zeroQueuedReceipts();
     }
 
     function test_initiateCooldown_revertsWithoutShares() public {
