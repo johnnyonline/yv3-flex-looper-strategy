@@ -168,12 +168,12 @@ abstract contract BaseLooper is BaseHealthCheck {
     }
 
     /// @notice Set the target leverage ratio for the strategy.
-    /// @dev Allows keepers to tune target leverage without changing the buffer or max leverage ratio.
+    /// @dev Allows emergency authorized to tune target leverage without changing the buffer or max leverage ratio.
     ///      Setting target to 0 disables leverage targeting and clears the buffer.
     /// @param _targetLeverageRatio The target leverage ratio.
     function setLeverageParams(
         uint256 _targetLeverageRatio
-    ) external onlyKeepers {
+    ) external onlyEmergencyAuthorized {
         _setLeverageParams(
             _targetLeverageRatio,
             _targetLeverageRatio == 0 ? 0 : leverageBuffer,
@@ -962,7 +962,7 @@ abstract contract BaseLooper is BaseHealthCheck {
     //////////////////////////////////////////////////////////////*/
 
     /// @notice Emergency full position close via flashloan
-    function manualFullUnwind() external accrue onlyEmergencyAuthorized {
+    function manualFullUnwind() external virtual accrue onlyEmergencyAuthorized {
         // Set leverage target to 0..
         _setLeverageParams(0, 0, 1e18);
         _withdrawFunds(type(uint256).max);
