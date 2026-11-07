@@ -3,16 +3,18 @@ pragma solidity ^0.8.18;
 import "forge-std/console2.sol";
 import {Setup} from "./utils/Setup.sol";
 import {ITroveManager} from "../interfaces/ITroveManager.sol";
+import {IStakedToken} from "../interfaces/IStakedToken.sol";
+import {ILiveYieldSharing} from "./interfaces/IInfiniFi.sol";
 
-import {StrategyAprOracle} from "../periphery/StrategyAprOracle.sol";
+import {InfinifiAprOracle} from "../periphery/InfinifiAprOracle.sol";
 
 contract OracleTest is Setup {
 
-    StrategyAprOracle public oracle;
+    InfinifiAprOracle public oracle;
 
     function setUp() public override {
         super.setUp();
-        oracle = new StrategyAprOracle();
+        oracle = new InfinifiAprOracle();
     }
 
     function checkOracle(
@@ -46,7 +48,7 @@ contract OracleTest is Setup {
 
         // Drop the Trove rate to the minimum so the loop earns a positive spread
         uint256 _minRate = ITroveManager(troveManager).min_annual_interest_rate();
-        vm.prank(keeper);
+        vm.prank(emergencyAdmin);
         strategy.adjustInterestRate(_minRate, 0, 0, type(uint256).max);
 
         mintAndDepositIntoStrategy(strategy, user, _amount);
@@ -54,6 +56,23 @@ contract OracleTest is Setup {
         uint256 _delta = (_amount * _percentChange) / MAX_BPS;
 
         checkOracle(address(strategy), _delta);
+    }
+
+    function test_oracle_zeroOnceRewardsVest() public {
+        // Drop the Trove rate to the minimum so the loop earns a positive spread
+        uint256 _minRate = ITroveManager(troveManager).min_annual_interest_rate();
+        vm.prank(emergencyAdmin);
+        strategy.adjustInterestRate(_minRate, 0, 0, type(uint256).max);
+        assertGt(oracle.aprAfterDebtChange(address(strategy), 0), 0, "!streaming");
+
+        // With no new accrual, InfiniFi's escrow has fully vested after the interpolation window
+        ILiveYieldSharing _yieldSharing = ILiveYieldSharing(IStakedToken(siusd).yieldSharing());
+        skip(_yieldSharing.interpolationDuration() + 1);
+        assertEq(oracle.aprAfterDebtChange(address(strategy), 0), 0, "!vested");
+
+        // Distributing what vested doesn't change the quote
+        _yieldSharing.distributeInterpolationRewards();
+        assertEq(oracle.aprAfterDebtChange(address(strategy), 0), 0, "!distributed");
     }
 
 }

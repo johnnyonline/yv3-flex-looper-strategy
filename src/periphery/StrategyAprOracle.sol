@@ -46,10 +46,10 @@ contract StrategyAprOracle is AprOracleBase {
         uint256 _leverage = _looper.targetLeverageRatio();
         if (_leverage == 0) return 0;
 
-        // Collateral APR from the central oracle, after our levered delta in collateral units
+        // Collateral APR, after our levered delta in collateral units
         int256 _collateralDelta = _delta * int256(_leverage) / int256(_WAD) * int256(_ORACLE_PRICE_SCALE)
             / int256(IPriceOracle(_looper.ORACLE()).get_price());
-        uint256 _collateralApr = CENTRAL_APR_ORACLE.getStrategyApr(_looper.collateralToken(), _collateralDelta);
+        uint256 _collateralApr = _getCollateralApr(_looper.collateralToken(), _collateralDelta);
 
         // Borrow APR is the Trove's own annual rate, unaffected by size.
         // Flex scales it by borrow-token precision, convert it to WAD
@@ -60,6 +60,17 @@ contract StrategyAprOracle is AprOracleBase {
         uint256 _gross = _leverage * _collateralApr / _WAD;
         uint256 _cost = (_leverage - _WAD) * _borrowApr / _WAD;
         return _gross > _cost ? _gross - _cost : 0;
+    }
+
+    /// @notice The collateral's APR after a `_collateralDelta` change, from the central oracle
+    /// @param _collateral The collateral token
+    /// @param _collateralDelta The change in collateral units
+    /// @return The collateral's APR in WAD
+    function _getCollateralApr(
+        address _collateral,
+        int256 _collateralDelta
+    ) internal view virtual returns (uint256) {
+        return CENTRAL_APR_ORACLE.getStrategyApr(_collateral, _collateralDelta);
     }
 
 }

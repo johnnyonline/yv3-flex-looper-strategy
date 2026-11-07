@@ -300,10 +300,10 @@ abstract contract BaseOperationTest is Setup {
         vm.stopPrank();
     }
 
-    function test_setLeverageParams_keeperCanTuneWithoutChangingMax() public {
+    function test_setLeverageParams_emergencyCanTuneWithoutChangingMax() public {
         uint256 buffer = strategy.leverageBuffer();
 
-        vm.prank(keeper);
+        vm.prank(emergencyAdmin);
         strategy.setLeverageParams(2.25e18);
 
         assertEq(strategy.targetLeverageRatio(), 2.25e18, "!new target");
@@ -311,8 +311,8 @@ abstract contract BaseOperationTest is Setup {
         assertEq(strategy.maxLeverageRatio(), 4e18, "!max should stay unchanged");
     }
 
-    function test_setLeverageParams_keeperZeroTargetClearsBuffer() public {
-        vm.prank(keeper);
+    function test_setLeverageParams_emergencyZeroTargetClearsBuffer() public {
+        vm.prank(emergencyAdmin);
         strategy.setLeverageParams(0);
 
         assertEq(strategy.targetLeverageRatio(), 0, "!target");
@@ -320,9 +320,9 @@ abstract contract BaseOperationTest is Setup {
         assertEq(strategy.maxLeverageRatio(), 4e18, "!max should stay unchanged");
     }
 
-    function test_setLeverageParams_keeperSetter_rejectsNonKeeper() public {
-        vm.prank(user);
-        vm.expectRevert("!keeper");
+    function test_setLeverageParams_targetSetter_onlyEmergencyAuthorized() public {
+        vm.prank(keeper);
+        vm.expectRevert("!emergency authorized");
         strategy.setLeverageParams(2.25e18);
     }
 
