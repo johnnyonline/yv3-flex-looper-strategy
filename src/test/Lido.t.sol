@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.18;
 
+import {stdStorage, StdStorage} from "forge-std/Test.sol";
+
 import {LidoSetup} from "./utils/LidoSetup.sol";
 import {BaseOperationTest} from "./base/Operation.t.sol";
 import {BaseShutdownTest} from "./base/Shutdown.t.sol";
@@ -18,6 +20,8 @@ import {ICurveFi, IwstETH} from "../interfaces/IStethInterfaces.sol";
 /// @notice wstETH/WETH specific tests: conversions through the live venue, borrowing only the lender's idle,
 ///         and the cooldown through Lido's withdrawal queue
 contract LidoTest is LidoSetup {
+
+    using stdStorage for StdStorage;
 
     ICurveFi public constant CURVE_POOL = ICurveFi(0xDC24316b9AE028F1497c275EB9192a3Ea0f67022);
     ICentralAprOracle public constant CENTRAL_APR_ORACLE =
@@ -258,8 +262,7 @@ contract LidoTest is LidoSetup {
         // Lido finalizes, and we claim 1:1
         _finalizeLidoRequest(_requestId);
         uint256 _idleBefore = strategy.balanceOfAsset();
-        vm.prank(emergencyAdmin);
-        uint256 _claimed = looper.claimCooldown(_requestId);
+        uint256 _claimed = _claimCooldown(_requestId);
         assertApproxEqAbs(_claimed, _pending, 2, "!claimed");
         assertEq(strategy.balanceOfAsset(), _idleBefore + _claimed, "!idle");
         assertEq(looper.pendingRedemptions(), 0, "!pending cleared");
@@ -293,20 +296,97 @@ contract LidoTest is LidoSetup {
         // Claiming the first still blocks reports
         _finalizeLidoRequest(_secondId);
         uint256 _secondPending = looper.pendingRedemptions() - _firstPending;
-        vm.prank(emergencyAdmin);
-        looper.claimCooldown(_firstId);
+        _claimCooldown(_firstId);
         assertEq(looper.pendingRedemptions(), _secondPending, "!first");
         vm.prank(keeper);
         vm.expectRevert("!cooldown");
         strategy.report();
 
         // Claiming both unblocks them
-        vm.prank(emergencyAdmin);
-        looper.claimCooldown(_secondId);
+        _claimCooldown(_secondId);
         assertEq(looper.pendingRedemptions(), 0, "!pending");
         vm.prank(management);
         strategy.setLossLimitRatio(100);
         vm.prank(keeper);
+        strategy.report();
+    }
+
+    function test_claimCooldown_multipleRequests(
+        uint256 _amount
+    ) public {
+        _amount = bound(_amount, minFuzzAmount, 900e18); // under Lido's 1000 stETH per-request cap
+        uint256 _loose = _unwindToLoose(_amount);
+
+        // Queue it in two requests, and Lido finalizes both
+        uint256[] memory _requestIds = new uint256[](2);
+        vm.startPrank(emergencyAdmin);
+        _requestIds[0] = looper.initiateCooldown(_loose / 2);
+        _requestIds[1] = looper.initiateCooldown(type(uint256).max);
+        vm.stopPrank();
+        uint256 _pending = looper.pendingRedemptions();
+        _finalizeLidoRequest(_requestIds[1]);
+
+        // Claim both at once, 1:1
+        uint256 _idleBefore = strategy.balanceOfAsset();
+        uint256 _claimed = _claimCooldown(_requestIds);
+        assertApproxEqAbs(_claimed, _pending, 4, "!claimed");
+        assertEq(strategy.balanceOfAsset(), _idleBefore + _claimed, "!idle");
+        assertEq(looper.pendingRedemptions(), 0, "!pending");
+
+        // Reports go through again
+        vm.prank(management);
+        strategy.setLossLimitRatio(100);
+        vm.prank(keeper);
+        strategy.report();
+    }
+
+    function test_zeroPendingRedemptions_clearsStuckPending(
+        uint256 _amount
+    ) public {
+        _amount = bound(_amount, minFuzzAmount, 900e18); // under Lido's 1000 stETH per-request cap
+        _unwindToLoose(_amount);
+
+        // A request Lido hasn't finalized blocks reports
+        vm.prank(emergencyAdmin);
+        uint256 _requestId = looper.initiateCooldown(type(uint256).max);
+        uint256 _pending = looper.pendingRedemptions();
+        vm.prank(keeper);
+        vm.expectRevert("!cooldown");
+        strategy.report();
+
+        // Management zeroes it, and reports go through, taking it as a loss
+        uint256 _totalAssetsBefore = strategy.estimatedTotalAssets();
+        vm.prank(management);
+        looper.zeroPendingRedemptions();
+        assertEq(looper.pendingRedemptions(), 0, "!pending");
+        assertEq(strategy.estimatedTotalAssets(), _totalAssetsBefore - _pending, "!totalAssets");
+        vm.prank(management);
+        strategy.setDoHealthCheck(false);
+        vm.prank(keeper);
+        (, uint256 _loss) = strategy.report();
+        assertGe(_loss, _pending, "!loss");
+
+        // If the request is claimed after all, it comes back as profit
+        _finalizeLidoRequest(_requestId);
+        uint256 _claimed = _claimCooldown(_requestId);
+        assertEq(looper.pendingRedemptions(), 0, "!still zero");
+        vm.prank(management);
+        strategy.setDoHealthCheck(false);
+        vm.prank(keeper);
+        (uint256 _profit,) = strategy.report();
+        assertEq(_profit, _claimed, "!profit");
+    }
+
+    function test_report_ignoresPendingDust() public {
+        // Rounding dust in the queued stETH doesn't block reports
+        stdstore.target(address(looper)).sig("queuedSteth()").checked_write(1_000);
+        vm.prank(keeper);
+        strategy.report();
+
+        // Anything above it does
+        stdstore.target(address(looper)).sig("queuedSteth()").checked_write(1_001);
+        vm.prank(keeper);
+        vm.expectRevert("!cooldown");
         strategy.report();
     }
 
@@ -338,11 +418,16 @@ contract LidoTest is LidoSetup {
 
         vm.prank(user);
         vm.expectRevert("!emergency authorized");
-        looper.claimCooldown(1);
+        looper.claimCooldown(new uint256[](0), new uint256[](0));
 
         vm.prank(user);
         vm.expectRevert("!management");
         looper.setIgnorePending(true);
+
+        // sam can't zero the queued stETH, only management
+        vm.prank(emergencyAdmin);
+        vm.expectRevert("!management");
+        looper.zeroPendingRedemptions();
     }
 
     function test_initiateCooldown_revertsWithoutShares() public {
@@ -354,9 +439,11 @@ contract LidoTest is LidoSetup {
     function test_claimCooldown_revertsForUnknownRequest(
         uint256 _requestId
     ) public {
+        uint256[] memory _requestIds = new uint256[](1);
+        _requestIds[0] = _requestId;
         vm.prank(emergencyAdmin);
         vm.expectRevert();
-        looper.claimCooldown(_requestId);
+        looper.claimCooldown(_requestIds, new uint256[](1));
     }
 
     /// @dev Tend, returning the upfront fee Flex added to the debt on top of what we borrowed
@@ -391,6 +478,25 @@ contract LidoTest is LidoSetup {
 
         _loose = strategy.balanceOfCollateralToken();
         assertGt(_loose, 0, "!loose");
+    }
+
+    /// @dev Claim a request as sam, with the checkpoint hint an off-chain caller would find
+    function _claimCooldown(
+        uint256 _requestId
+    ) internal returns (uint256) {
+        uint256[] memory _requestIds = new uint256[](1);
+        _requestIds[0] = _requestId;
+        return _claimCooldown(_requestIds);
+    }
+
+    /// @dev Claim requests as sam, with the checkpoint hints an off-chain caller would find
+    function _claimCooldown(
+        uint256[] memory _requestIds
+    ) internal returns (uint256) {
+        ILidoQueue _queue = ILidoQueue(address(looper.WITHDRAWAL_QUEUE()));
+        uint256[] memory _hints = _queue.findCheckpointHints(_requestIds, 1, _queue.getLastCheckpointIndex());
+        vm.prank(emergencyAdmin);
+        return looper.claimCooldown(_requestIds, _hints);
     }
 
     /// @dev Finalize Lido withdrawal requests up to `_requestId` by pranking the stETH contract

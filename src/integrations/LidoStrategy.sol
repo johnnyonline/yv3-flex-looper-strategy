@@ -26,6 +26,9 @@ contract LidoFlexLooperStrategy is FlexLooperStrategy {
     // Constants
     // ===============================================================
 
+    /// @notice Pending amount below which reports are not blocked, for stETH rounding dust
+    uint256 internal constant _PENDING_DUST = 1_000; // 1e-15 WETH
+
     /// @notice WETH token
     address public constant WETH = 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2;
 
@@ -77,7 +80,7 @@ contract LidoFlexLooperStrategy is FlexLooperStrategy {
     /// @inheritdoc BaseLooper
     function _harvestAndReport() internal override returns (uint256) {
         // Block reports until everything queued is back as asset, unless management says otherwise
-        require(ignorePending || pendingRedemptions() == 0, "!cooldown");
+        require(ignorePending || pendingRedemptions() <= _PENDING_DUST, "!cooldown");
         return super._harvestAndReport();
     }
 
@@ -91,6 +94,12 @@ contract LidoFlexLooperStrategy is FlexLooperStrategy {
         bool _ignorePending
     ) external onlyManagement {
         ignorePending = _ignorePending;
+    }
+
+    /// @notice Zero the queued stETH
+    /// @dev Escape hatch for a request that can't be claimed. Whatever is zeroed shows up as a loss on report
+    function zeroPendingRedemptions() external onlyManagement {
+        queuedSteth = 0;
     }
 
     /// @notice Unwrap loose wstETH and queue the stETH for a 1:1 withdrawal through Lido
@@ -115,20 +124,27 @@ contract LidoFlexLooperStrategy is FlexLooperStrategy {
         _requestId = WITHDRAWAL_QUEUE.requestWithdrawals(_amounts, address(this))[0];
     }
 
-    /// @notice Claim a finalized withdrawal request from Lido
-    /// @param _requestId The withdrawal request id to claim
+    /// @notice Claim finalized withdrawal requests from Lido, with checkpoint hints
+    /// @dev Lido warns its own hint search in `claimWithdrawal` can run out of gas
+    /// @param _requestIds The withdrawal request ids to claim
+    /// @param _hints The checkpoint hints, from the queue's `findCheckpointHints`
     /// @return _assets The amount of asset claimed
     function claimCooldown(
-        uint256 _requestId
+        uint256[] calldata _requestIds,
+        uint256[] calldata _hints
     ) external onlyEmergencyAuthorized returns (uint256 _assets) {
-        // Consume the queued stETH by the request's amount, so a discounted claim shows up as a loss on report
-        uint256[] memory _requestIds = new uint256[](1);
-        _requestIds[0] = _requestId;
-        queuedSteth -= Math.min(WITHDRAWAL_QUEUE.getWithdrawalStatus(_requestIds)[0].amountOfStETH, queuedSteth);
+        // Consume the queued stETH by the requests' amounts, so a discounted claim shows up as a loss on report
+        ILidoWithdrawalQueue.WithdrawalRequestStatus[] memory _statuses =
+            WITHDRAWAL_QUEUE.getWithdrawalStatus(_requestIds);
+        uint256 _claimedSteth;
+        for (uint256 i; i < _statuses.length; ++i) {
+            _claimedSteth += _statuses[i].amountOfStETH;
+        }
+        queuedSteth -= Math.min(_claimedSteth, queuedSteth);
 
-        // Claim the withdrawal and wrap the received ETH
+        // Claim the withdrawals and wrap the received ETH
         uint256 _balanceBefore = balanceOfAsset();
-        WITHDRAWAL_QUEUE.claimWithdrawal(_requestId);
+        WITHDRAWAL_QUEUE.claimWithdrawals(_requestIds, _hints);
         if (address(this).balance > 0) IWETH(WETH).deposit{value: address(this).balance}();
         _assets = balanceOfAsset() - _balanceBefore;
         require(_assets > 0, "!assets");
