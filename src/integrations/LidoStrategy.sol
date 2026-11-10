@@ -27,7 +27,7 @@ contract LidoFlexLooperStrategy is FlexLooperStrategy {
     // ===============================================================
 
     /// @notice Pending amount below which reports are not blocked, for stETH rounding dust
-    uint256 internal constant _PENDING_DUST = 1_000; // 1e-15 WETH
+    uint256 internal constant _PENDING_DUST = 1e15; // 0.001 WETH
 
     /// @notice WETH token
     address public constant WETH = 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2;

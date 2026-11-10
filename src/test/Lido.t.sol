@@ -378,13 +378,13 @@ contract LidoTest is LidoSetup {
     }
 
     function test_report_ignoresPendingDust() public {
-        // Rounding dust in the queued stETH doesn't block reports
-        stdstore.target(address(looper)).sig("queuedSteth()").checked_write(1_000);
+        // Up to 0.001 WETH queued doesn't block reports
+        stdstore.target(address(looper)).sig("queuedSteth()").checked_write(1e15);
         vm.prank(keeper);
         strategy.report();
 
         // Anything above it does
-        stdstore.target(address(looper)).sig("queuedSteth()").checked_write(1_001);
+        stdstore.target(address(looper)).sig("queuedSteth()").checked_write(1e15 + 1);
         vm.prank(keeper);
         vm.expectRevert("!cooldown");
         strategy.report();
