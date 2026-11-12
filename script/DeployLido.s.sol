@@ -17,6 +17,17 @@ interface IAprOracle {
 
 }
 
+interface IWETH {
+
+    function deposit() external payable;
+
+    function approve(
+        address _spender,
+        uint256 _amount
+    ) external returns (bool);
+
+}
+
 // ---- Usage ----
 // forge script script/DeployLido.s.sol:DeployLido --verify --slow -g 150 --etherscan-api-key $KEY --rpc-url $ETH_RPC_URL --broadcast
 
@@ -27,6 +38,7 @@ contract DeployLido is Script {
 
     address private constant TROVE_MANAGER = 0x5fF405CC51705D609F7F2CCc2Bb36a66675938fC; // wstETH/WETH market
     address private constant EXCHANGE = 0x706AA50385C51596b6d9cBcf97645C6a98940c03; // WETHWstETHExchange
+    address private constant WETH = 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2;
 
     address private constant DEPLOYER = 0x420ACF637D662b80cca8bEfb327AA24039E7e0Fa; // gm.johnnyonline.eth
     address private constant SMS = 0x16388463d60FFE0661Cf7F1f31a7D658aC790ff7; // sms mainnet
@@ -36,6 +48,9 @@ contract DeployLido is Script {
     address private constant CHAD = 0xFEB4acf3df3cDEA7399794D0869ef76A6EfAff52; // Chad mainnet
 
     IAprOracle private constant CENTRAL_APR_ORACLE = IAprOracle(0x1981AD9F44F2EA9aDd2dC4AD7D075c102C70aF92);
+
+    uint256 private constant SEED = 0.11 ether; // openTrove borrows MIN_DEBT (0.1 WETH) against it, so it must clear the 104% MCR
+    uint256 private constant RATE = 0.02e18; // 2%
 
     function run() external {
         uint256 _privateKey = vm.envUint("DEPLOYER_PRIVATE_KEY");
@@ -67,6 +82,15 @@ contract DeployLido is Script {
         address _aprOracle = address(new StrategyAprOracle());
         CENTRAL_APR_ORACLE.setOracle(_strategy, _aprOracle);
 
+        // Seed from the deployer, open the Trove and lever up
+        strategy.setAllowed(DEPLOYER, true);
+        IWETH(WETH).deposit{value: SEED}();
+        IWETH(WETH).approve(_strategy, SEED);
+        strategy.deposit(SEED, DEPLOYER);
+        strategy.setAllowed(DEPLOYER, false);
+        strategy.openTrove(RATE, 0, 0, type(uint256).max);
+        strategy.tend();
+
         strategy.setPendingManagement(SMS);
 
         vm.stopBroadcast();
@@ -74,7 +98,14 @@ contract DeployLido is Script {
         console.log("-----------------------------");
         console.log("Strategy deployed at: ", _strategy);
         console.log("APR oracle deployed at: ", _aprOracle);
+        console.log("Leverage: ", strategy.getCurrentLeverageRatio());
         console.log("-----------------------------");
     }
 
 }
+
+// -----------------------------
+// Strategy deployed at:  0xFEDBE4377C42365b2349f85869e8464d15bA704b
+// APR oracle deployed at:  0xeb0A9959aC414D56982461517882e186aBf43978
+// Leverage:  10004574972060129926
+// -----------------------------
