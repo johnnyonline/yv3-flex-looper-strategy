@@ -14,6 +14,7 @@ import {LidoFlexLooperStrategy} from "../integrations/LidoStrategy.sol";
 import {StrategyAprOracle} from "../periphery/StrategyAprOracle.sol";
 import {ICentralAprOracle} from "../interfaces/ICentralAprOracle.sol";
 import {IDutchDesk} from "../interfaces/IDutchDesk.sol";
+import {IStrategyInterface} from "../interfaces/IStrategyInterface.sol";
 import {ITroveManager} from "../interfaces/ITroveManager.sol";
 import {ICurveFi, IwstETH} from "../interfaces/IStethInterfaces.sol";
 
@@ -210,13 +211,61 @@ contract LidoTest is LidoSetup {
 
         // Levered wstETH yield minus the borrow cost on the borrowed share
         uint256 _wstethApr = CENTRAL_APR_ORACLE.getStrategyApr(WSTETH, 0);
-        uint256 _leverage = strategy.targetLeverageRatio();
+        uint256 _leverage = strategy.getCurrentLeverageRatio();
         assertGt(_wstethApr, 0, "!wstETH apr");
         assertEq(
             _oracle.aprAfterDebtChange(address(strategy), 0),
             _leverage * _wstethApr / 1e18 - (_leverage - 1e18) * _minRate / 1e18,
             "!apr"
         );
+    }
+
+    function test_aprOracle_followsLeverage() public {
+        StrategyAprOracle _oracle = new StrategyAprOracle();
+
+        // Run the Trove at the minimum rate, which also puts it first in line for redemptions
+        uint256 _minRate = ITroveManager(troveManager).min_annual_interest_rate();
+        vm.prank(emergencyAdmin);
+        strategy.adjustInterestRate(_minRate, 0, 0, type(uint256).max);
+
+        // Lever up to the target
+        mintAndDepositIntoStrategy(strategy, user, 100e18);
+        vm.prank(keeper);
+        strategy.tend();
+        uint256 _leverageBefore = strategy.getCurrentLeverageRatio();
+        uint256 _aprBefore = _oracle.aprAfterDebtChange(address(strategy), 0);
+
+        // A Lender withdrawal beyond its idle redeems half of our debt
+        _drainLenderIdle(0);
+        uint256 _shares = IStrategyInterface(lender).convertToShares(strategy.balanceOfDebt() / 2);
+        vm.prank(lenderUser);
+        IStrategyInterface(lender).redeem(_shares, lenderUser, lenderUser);
+
+        // We sit below the target now, and the quote follows
+        uint256 _leverage = strategy.getCurrentLeverageRatio();
+        assertLt(_leverage, _leverageBefore, "!redeemed");
+        assertLt(_leverage, strategy.targetLeverageRatio() - strategy.leverageBuffer(), "!under target");
+        uint256 _apr = _oracle.aprAfterDebtChange(address(strategy), 0);
+        uint256 _wstethApr = CENTRAL_APR_ORACLE.getStrategyApr(WSTETH, 0);
+        assertEq(_apr, _leverage * _wstethApr / 1e18 - (_leverage - 1e18) * _minRate / 1e18, "!apr");
+        assertLt(_apr, _aprBefore, "!lower");
+    }
+
+    function test_aprOracle_noPosition() public {
+        StrategyAprOracle _oracle = new StrategyAprOracle();
+
+        // A strategy that never opened its Trove has no leverage to quote
+        address _fresh = _deployLidoStrategy();
+        assertEq(_oracle.aprAfterDebtChange(_fresh, 0), 0, "!no position");
+        assertEq(_oracle.aprAfterDebtChange(_fresh, 1e18), 0, "!no position delta");
+
+        // Nor does one whose debt outgrew its collateral
+        vm.mockCall(
+            address(strategy),
+            abi.encodeWithSelector(strategy.getCurrentLeverageRatio.selector),
+            abi.encode(type(uint256).max)
+        );
+        assertEq(_oracle.aprAfterDebtChange(address(strategy), 0), 0, "!underwater");
     }
 
     function test_unwind_redeemsEquityThroughLido(

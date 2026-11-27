@@ -87,4 +87,5 @@ contract Deploy is Script {
 }
 
 // yvUSD/USDC Flex Looper:  0x255f538312331e2921387Ea18D901c84a9614f90
-// APR oracle deployed at:  0x1eCcDF4e8792CBAa21D2983290dD8042E9d5c0D7
+// APR oracle deployed at (v1, using target leverage):  0x1eCcDF4e8792CBAa21D2983290dD8042E9d5c0D7
+// APR oracle deployed at (v2, using current leverage):  0xb29932484A755B19bbFe4BFdbc1bD21815Eab197
