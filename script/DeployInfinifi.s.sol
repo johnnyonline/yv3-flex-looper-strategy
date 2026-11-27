@@ -4,7 +4,7 @@ pragma solidity 0.8.23;
 import {IStrategyInterface} from "../src/interfaces/IStrategyInterface.sol";
 
 import {InfinifiFlexLooperStrategy} from "../src/integrations/InfinifiStrategy.sol";
-import {InfinifiAprOracle} from "../src/periphery/InfinifiAprOracle.sol";
+import {StrategyAprOracle} from "../src/periphery/StrategyAprOracle.sol";
 
 import "forge-std/Script.sol";
 
@@ -63,7 +63,7 @@ contract DeployInfinifi is Script {
         strategy.setEmergencyAdmin(EMERGENCY_ADMIN);
 
         // Deploy and register the looper APR oracle
-        address _aprOracle = address(new InfinifiAprOracle());
+        address _aprOracle = address(new StrategyAprOracle());
         CENTRAL_APR_ORACLE.setOracle(_strategy, _aprOracle);
 
         strategy.setPendingManagement(SMS);

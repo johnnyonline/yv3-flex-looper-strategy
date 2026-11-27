@@ -43,8 +43,8 @@ contract StrategyAprOracle is AprOracleBase {
     ) external view override returns (uint256) {
         IStrategyInterface _looper = IStrategyInterface(_strategy);
 
-        uint256 _leverage = _looper.targetLeverageRatio();
-        if (_leverage == 0) return 0;
+        uint256 _leverage = _looper.getCurrentLeverageRatio();
+        if (_leverage == 0 || _leverage == type(uint256).max) return 0;
 
         // Collateral APR, after our levered delta in collateral units
         int256 _collateralDelta = _delta * int256(_leverage) / int256(_WAD) * int256(_ORACLE_PRICE_SCALE)
